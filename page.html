@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 1em;
+        font-family: Arial, sans-serif;
+        left: 0;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        display: flex;
+        flex-direction: column;
+        box-sizing: border-box;
+        height: 100vh;
+        gap: 0.5em;
+      }
+      pre {
+        margin: 0;
+        padding: 0;
+        white-space: pre-wrap;
+      }
+      .split {
+        display: flex;
+        flex-direction: row;
+        gap: 0.5em;
+      }
+      .split > * {
+        width: 100%;
+        overflow-y: auto;
+        height: 100%;
+      }
+    </style>
+    <script type="module">
+      import {
+        base64toFloat32Array,
+        base64toFloat32ArrayWorker,
+      } from "./base64toFloat32Array.worker.mjs";
+      /**
+       * @typedef ServerData
+       *
+       * @property {Record<string, number[] | string} data
+       * @property {object} request
+       */
+      const requestData = () => ({
+        method: "POST",
+        body: JSON.stringify({
+          size: document.getElementById("size").valueAsNumber,
+          seed: document.getElementById("seed").valueAsNumber,
+          fields: Array.from(
+            { length: document.getElementById("fields").valueAsNumber },
+            (_, i) => `field${i}`
+          ),
+        }),
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      const BytesFormat = new Intl.NumberFormat("en", {
+        style: "unit",
+        unit: "byte",
+        unitDisplay: "long",
+        maximumFractionDigits: 2,
+      }).format;
+
+      const TimeFormat = new Intl.NumberFormat("en", {
+        style: "unit",
+        unit: "second",
+        unitDisplay: "long",
+        maximumFractionDigits: 4,
+      }).format;
+
+      /**
+       * @param {boolean} isCompressed
+       * @returns {Promise<void>}
+       */
+      window.getData = async function getData(isCompressed) {
+        const fieldsSize = document.getElementById("fields").valueAsNumber;
+        const isWebWorker =
+          document.getElementById("webworkers").checked ?? false;
+        const start = performance.now() / 1000;
+        const response = await fetch(
+          `http://localhost:8000/${
+            isCompressed ? "get-numpy-base64" : "get-raw"
+          }`,
+          requestData()
+        );
+        const data = await response.json();
+        const workerPromises = [];
+        for (const key in data.data) {
+          const value = data.data[key];
+          if (typeof value === "string") {
+            if (!isWebWorker) {
+              const parseProcess = performance.now();
+              data.data[key] = [...base64toFloat32Array(value).values()];
+              const parseProcessEnd = performance.now();
+              performance.measure(`${key} - parseProcess`, {
+                start: parseProcess,
+                end: parseProcessEnd,
+              });
+            } else {
+              const parseProcess = performance.now();
+              workerPromises.push(
+                base64toFloat32ArrayWorker(value).then((v) => {
+                  data.data[key] = [...v.values()];
+                  const parseProcessEnd = performance.now();
+                  performance.measure(`${key} - parseProcess`, {
+                    start: parseProcess,
+                    end: parseProcessEnd,
+                  });
+                })
+              );
+            }
+          }
+        }
+        await Promise.all(workerPromises);
+        const end = performance.now() / 1000;
+        const speed = (end - start).toFixed(4);
+
+        document.getElementById(
+          isCompressed ? "compressed" : "no-compressed"
+        ).textContent =
+          JSON.stringify(data.data, null, 2).substring(0, 3000) + "...";
+        document.getElementById(
+          isCompressed ? "compressed-speed" : "no-compressed-speed"
+        ).textContent = `Speed: ${TimeFormat(speed)}, Size: ${BytesFormat(
+          response.headers.get("Content-Length")
+        )}`;
+      };
+    </script>
+  </head>
+  <body>
+    <div>
+      <span>Seed: </span>
+      <input type="number" id="seed" value="42" />
+      <span>Size: </span>
+      <input type="number" id="size" value="10000" />
+      <span>Fields: </span>
+      <input type="number" id="fields" value="10" />
+      <span>With WebWorkers: </span>
+      <input type="checkbox" id="webworkers" />
+    </div>
+    <div class="split">
+      <button onclick="getData(false)">Load raw data</button>
+      <button onclick="getData(true)">Load compressed numpy data</button>
+    </div>
+    <div class="split">
+      <span id="no-compressed-speed">-</span>
+      <span id="compressed-speed">-</span>
+    </div>
+    <div class="split" style="flex-grow: 1; overflow-y: auto">
+      <div>
+        <h4>No Compress</h4>
+        <pre id="no-compressed"></pre>
+      </div>
+      <div>
+        <h4>Compress</h4>
+        <pre id="compressed"></pre>
+      </div>
+    </div>
+  </body>
+</html>
