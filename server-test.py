@@ -13,7 +13,7 @@ def get_fields(size: int) -> list[str]:
     return [f"field{i + 1}" for i in range(0, size)]
 
 def get_request_times(url: str, json: dict, headers: dict) -> list[float]:
-    return timeit.repeat(lambda: requests.post(url, json=json, headers=headers).json(), number=RUN_FOR_NUMBERS, repeat=REPEAT)
+    return timeit.repeat(lambda: requests.post(url, json=json, headers=headers).content, number=RUN_FOR_NUMBERS, repeat=REPEAT)
 
 async def get_request_times_async(url: str, json: dict, headers: dict) -> list[float]:
     res = []
@@ -22,7 +22,7 @@ async def get_request_times_async(url: str, json: dict, headers: dict) -> list[f
             start = datetime.datetime.now()
             _requests = [session.post(url, json=json, headers=headers) for _ in range(RUN_FOR_NUMBERS)]
             _results = await asyncio.gather(*_requests)
-            await asyncio.gather(*[_result.json() for _result in _results])
+            await asyncio.gather(*[_result.content.read() for _result in _results])
             [_result.close() for _result in _results]
             end = datetime.datetime.now()
             res.append((end - start).total_seconds())
@@ -30,7 +30,7 @@ async def get_request_times_async(url: str, json: dict, headers: dict) -> list[f
 
 event_loop = asyncio.new_event_loop()
 df = pd.DataFrame([], columns=['response_class_type', 'endpoint', 'size','field_length','samples', 'backend-async', 'frontend-async'])
-for response_class_type in tqdm(['dataclass', 'pydantic', 'msgspec'], desc="Response Class Type"):
+for response_class_type in tqdm(['dataclass', 'pydantic', 'msgspec', 'binary'], desc="Response Class Type"):
     for is_async in tqdm(['async-backend', 'sync-backend'], desc="Async Type", leave=False):
         PREFIX = "async-" if is_async == 'async-backend' else ""
         for size in tqdm([100, 1000, 10000], desc="Size", leave=False):
