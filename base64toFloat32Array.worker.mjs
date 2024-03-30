@@ -28,6 +28,7 @@ if (globalThis["WorkerGlobalScope"] && self instanceof WorkerGlobalScope) {
     self.postMessage(float32Array, [float32Array.buffer]);
   };
 } else {
+  // 5 workers should be enough for most cases
   workerPool.push(
     ...new Array(5).fill(null).map(
       (_, i) =>

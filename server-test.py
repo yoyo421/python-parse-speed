@@ -63,4 +63,5 @@ for is_async in ['async-backend', 'sync-backend']:
 
 df = df.explode('samples', ignore_index=True)
 df.rename(columns={'samples': 'time'}, inplace=True)
+df['time per field'] = df['time'] / df['field_length']
 df.to_csv(f'server-test.csv', index=True, index_label='index')

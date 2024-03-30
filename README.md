@@ -36,13 +36,17 @@ Responses are in json format and look like this:
 
 ## TL;DR
 
+The results are in the `server-test.csv` file, and the pivot tables are in the images below.
+
+Time took to parse the data in seconds:
+![server-test-pivot-table-nomralize](./server-test-pivot-table-nomralize.png)
 ![server-test-pivot-table](./server-test-pivot-table.png)
 
 The results here are for various sizes of data:
 
 - field size of 2, 5, 10
 - data size of 100, 1k, 10k
-- parallel vs sequential
+- parallel vs sequential (requesting methods)
 - async vs sync (in fastapi)
 - seed: 42
 
@@ -88,7 +92,7 @@ pip install -r requirements.txt
 6. Run the server:
 
 ```sh
-python server.py
+python -m uvicorn server:app --host localhost --port 8000
 ```
 
 7. Open `page.html` in your browser to interact with the application.
@@ -102,7 +106,7 @@ There is also a usage of webworkers to test the speed of parsing the data in a s
 1. Run the server:
 
 ```sh
-python server.py
+python -m uvicorn server:app --host localhost --port 8000
 ```
 
 2. Run the server-test.py script:
