@@ -8,7 +8,7 @@
       body {
         margin: 0;
         padding: 1em;
-        font-family: Arial, sans-serif;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
         left: 0;
         top: 0;
         right: 0;
@@ -18,11 +18,16 @@
         box-sizing: border-box;
         height: 100vh;
         gap: 0.5em;
+        background-color: #f4f4f4;
+        color: #333;
       }
       pre {
         margin: 0;
-        padding: 0;
+        padding: 0.5em;
         white-space: pre-wrap;
+        background-color: #fff;
+        border-radius: 5px;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
       }
       .split {
         display: flex;
@@ -33,6 +38,63 @@
         width: 100%;
         overflow-y: auto;
         height: 100%;
+        border-radius: 5px;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        box-sizing: border-box;
+      }
+      input,
+      select {
+        padding: 0.5em;
+        border: none;
+        border-radius: 5px;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+      }
+      button {
+        padding: 0.5em 1em;
+        border: none;
+        border-radius: 5px;
+        background-color: #007bff;
+        color: white;
+        cursor: pointer;
+      }
+      button:hover {
+        background-color: #0056b3;
+      }
+      h1,
+      h2,
+      h3,
+      h4,
+      h5,
+      h6 {
+        text-align: center;
+        vertical-align: middle;
+        margin: 0;
+        padding: 0.5em;
+      }
+    </style>
+    <style>
+      /* Scrollbars Works on Chrome, Edge, and Safari */
+      ::-webkit-scrollbar {
+        width: 12px;
+      }
+
+      ::-webkit-scrollbar-track {
+        background: #f1f1f1;
+      }
+
+      ::-webkit-scrollbar-thumb {
+        background: #888;
+        border-radius: 10px;
+      }
+
+      ::-webkit-scrollbar-thumb:hover {
+        background: #555;
+      }
+
+      /* Works on Firefox */
+      * {
+        scrollbar-width: thin;
+        scrollbar-color: #888 #f1f1f1;
       }
     </style>
     <script type="module">
@@ -55,6 +117,7 @@
             { length: document.getElementById("fields").valueAsNumber },
             (_, i) => `field${i}`
           ),
+          class_type: document.getElementById("class_type").value,
         }),
         headers: {
           "Content-Type": "application/json",
@@ -122,10 +185,12 @@
         const end = performance.now() / 1000;
         const speed = (end - start).toFixed(4);
 
+        const outputText = JSON.stringify(data.data, null, 2);
         document.getElementById(
           isCompressed ? "compressed" : "no-compressed"
         ).textContent =
-          JSON.stringify(data.data, null, 2).substring(0, 3000) + "...";
+          outputText.substring(0, 3000) +
+          (outputText.length > 3000 ? "..." : "");
         document.getElementById(
           isCompressed ? "compressed-speed" : "no-compressed-speed"
         ).textContent = `Speed: ${TimeFormat(speed)}, Size: ${BytesFormat(
@@ -136,6 +201,12 @@
   </head>
   <body>
     <div>
+      <span>Class Type: </span>
+      <select id="class_type">
+        <option value="dataclass">dataclass</option>
+        <option value="pydantic">pydantic</option>
+        <option selected value="msgspec">msgspec</option>
+      </select>
       <span>Seed: </span>
       <input type="number" id="seed" value="42" />
       <span>Size: </span>
@@ -146,6 +217,10 @@
       <input type="checkbox" id="webworkers" />
     </div>
     <div class="split">
+      <h2>No Compress</h2>
+      <h2>Compress</h2>
+    </div>
+    <div class="split">
       <button onclick="getData(false)">Load raw data</button>
       <button onclick="getData(true)">Load compressed numpy data</button>
     </div>
@@ -154,14 +229,8 @@
       <span id="compressed-speed">-</span>
     </div>
     <div class="split" style="flex-grow: 1; overflow-y: auto">
-      <div>
-        <h4>No Compress</h4>
-        <pre id="no-compressed"></pre>
-      </div>
-      <div>
-        <h4>Compress</h4>
-        <pre id="compressed"></pre>
-      </div>
+      <pre id="no-compressed"></pre>
+      <pre id="compressed"></pre>
     </div>
   </body>
 </html>

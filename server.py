@@ -6,7 +6,10 @@ from fastapi.middleware.gzip import GZipMiddleware
 import struct
 import numpy as np
 import base64
+import pydantic
+import msgspec
 import orjson
+from typing import Final, Literal, TypeVar
 
 router = APIRouter()
 
@@ -15,36 +18,58 @@ class RequestTabularData:
     size: int
     seed: int
     fields: list[str]
+    class_type: Literal['dataclass', 'pydantic', 'msgspec']
 
 @dataclasses.dataclass
-class ResponseTabularData:
-    data: dict[str, list[float] | bytes | str]
+class ResponseTabularData_DATACLASS:
+    data: dict[str, list[float] | str]
     # moking a non tabular data, response times 10
-    request: list[RequestTabularData]
+    request: list[dict]
 
     def get_fastapi_response(self) -> Response:
         return Response(orjson.dumps(dataclasses.asdict(self)), headers={"Content-Type": "application/json"})
+    
+class ResponseTabularData_PYDANTIC(pydantic.BaseModel):
+    data: dict[str, list[float] | str]
+    # moking a non tabular data, response times 10
+    request: list[dict]
 
-    @staticmethod
-    def raw(data: dict[str, np.ndarray], requests: RequestTabularData) -> 'ResponseTabularData':
-        return ResponseTabularData(
-            data={field: arr.tolist() for field, arr in data.items()}, 
-            request=[requests] * 10
-        )
+    def get_fastapi_response(self) -> Response:
+        return Response(self.model_dump_json(), headers={"Content-Type": "application/json"})
     
-    @staticmethod
-    def numpy_base64(data: dict[str, np.ndarray], requests: RequestTabularData) -> 'ResponseTabularData':
-        return ResponseTabularData(
-            data={field: base64.encodebytes(arr.tobytes()).decode('utf-8') for field, arr in data.items()}, 
-            request=[requests] * 10
-        )
-    
-    @staticmethod
-    def raw_base64(data: dict[str, np.ndarray], requests: RequestTabularData) -> 'ResponseTabularData':
-        return ResponseTabularData(
-            data={field: base64.encodebytes(struct.pack(f'{len(arr)}f', *arr.tolist())).decode('utf-8') for field, arr in data.items()}, 
-            request=[requests] * 10
-        )
+class ResponseTabularData_MSGSPEC(msgspec.Struct):
+    data: dict[str, list[float] | str]
+    # moking a non tabular data, response times 10
+    request: list[dict]
+
+    def get_fastapi_response(self) -> Response:
+        return Response(msgspec.json.encode(self), headers={"Content-Type": "application/json"})
+
+C = TypeVar('C', ResponseTabularData_DATACLASS, ResponseTabularData_PYDANTIC, ResponseTabularData_MSGSPEC)
+
+CLASS_TYPES: Final[dict[Literal['dataclass', 'pydantic', 'msgspec'], C]] = {
+    'dataclass': ResponseTabularData_DATACLASS,
+    'pydantic': ResponseTabularData_PYDANTIC,
+    'msgspec': ResponseTabularData_MSGSPEC
+}
+
+def raw_factory(cls: C, data: dict[str, np.ndarray], requests: RequestTabularData) -> C:
+    return cls(
+        data={field: arr.tolist() for field, arr in data.items()}, 
+        request=[dataclasses.asdict(requests)] * 10
+    )
+
+def numpy_base64_factory(cls: C, data: dict[str, np.ndarray], requests: RequestTabularData) -> C:
+    return cls(
+        data={field: base64.encodebytes(arr.tobytes()).decode('utf-8') for field, arr in data.items()}, 
+        request=[dataclasses.asdict(requests)] * 10
+    )
+
+def raw_base64_factory(cls: C, data: dict[str, np.ndarray], requests: RequestTabularData) -> C:
+    return cls(
+        data={field: base64.encodebytes(struct.pack(f'{len(arr)}f', *arr.tolist())).decode('utf-8') for field, arr in data.items()}, 
+        request=[dataclasses.asdict(requests)] * 10
+    )
 
 def get_random_data(size: int, seed: int, fields: list[str]) -> dict[str, np.ndarray]:
     random_state = np.random.RandomState(seed)
@@ -53,35 +78,35 @@ def get_random_data(size: int, seed: int, fields: list[str]) -> dict[str, np.nda
     }
     return data
 
-@router.post("/get-raw", response_model=ResponseTabularData)
+@router.post("/get-raw")
 def get_raw_data(body: RequestTabularData):
     data = get_random_data(body.size, body.seed, body.fields)
-    return ResponseTabularData.raw(data, body).get_fastapi_response()
+    return raw_factory(CLASS_TYPES[body.class_type], data, body).get_fastapi_response()
 
-@router.post("/get-numpy-base64", response_model=ResponseTabularData)
+@router.post("/get-numpy-base64")
 def get_numpy_bytes(body: RequestTabularData):
     data = get_random_data(body.size, body.seed, body.fields)
-    return ResponseTabularData.numpy_base64(data, body).get_fastapi_response()
+    return numpy_base64_factory(CLASS_TYPES[body.class_type], data, body).get_fastapi_response()
 
-@router.post("/get-raw-base64", response_model=ResponseTabularData)
+@router.post("/get-raw-base64")
 def get_numpy_bytes(body: RequestTabularData):
     data = get_random_data(body.size, body.seed, body.fields)
-    return ResponseTabularData.raw_base64(data, body).get_fastapi_response()
+    return raw_base64_factory(CLASS_TYPES[body.class_type], data, body).get_fastapi_response()
 
-@router.post("/async-get-raw", response_model=ResponseTabularData)
+@router.post("/async-get-raw")
 async def get_raw_data(body: RequestTabularData):
     data = get_random_data(body.size, body.seed, body.fields)
-    return ResponseTabularData.raw(data, body).get_fastapi_response()
+    return raw_factory(CLASS_TYPES[body.class_type], data, body).get_fastapi_response()
 
-@router.post("/async-get-numpy-base64", response_model=ResponseTabularData)
+@router.post("/async-get-numpy-base64")
 async def get_numpy_bytes(body: RequestTabularData):
     data = get_random_data(body.size, body.seed, body.fields)
-    return ResponseTabularData.numpy_base64(data, body).get_fastapi_response()
+    return numpy_base64_factory(CLASS_TYPES[body.class_type], data, body).get_fastapi_response()
 
-@router.post("/async-get-raw-base64", response_model=ResponseTabularData)
+@router.post("/async-get-raw-base64")
 async def get_numpy_bytes(body: RequestTabularData):
     data = get_random_data(body.size, body.seed, body.fields)
-    return ResponseTabularData.raw_base64(data, body).get_fastapi_response()
+    return raw_base64_factory(CLASS_TYPES[body.class_type], data, body).get_fastapi_response()
 
 app = FastAPI()
 

@@ -10,7 +10,7 @@ Example of 1k random data:
 Example of 100k random data:
 ![Example of 100k random data](./100k_random_data.PNG)
 
-I've created a `server.py` file to test the speed of parsing the data from a fastapi server. In the server there is the same function to generate random numbers between 0 and 1 million, as floats using numpy (because this is not the main point of the test) and then returning the data as a json.
+I've created a `server.py` file to test the speed of parsing the data from a fastapi server. In the server there is the same function to generate random numbers between 0 and 1 million, as floats using **numpy** (because this is not the main point of the test, making them using plain python could result in numpy implementation being slower) and then returning the data as a json.
 
 I also encluded Gzip because in a real world scenario, the data would be compressed. always.
 
@@ -28,6 +28,10 @@ all functions gets the same input:
 - `size` - the size of each array in the data
 - `seed` - the random seed to use
 - `fields` - fields of which i will return the data in
+- `class_type` - which python class architecture to use: `dataclass`, `pydantic` or `msgspec` \
+   **NOTE**: i will use `orjson` for `dataclass` because
+  - `dataclass` doesn't have `to_json` method
+  - `orjson` is faster than `json`
 
 Responses are in json format and look like this:
 
@@ -36,14 +40,17 @@ Responses are in json format and look like this:
 
 ## TL;DR
 
+Pydantic or MsgSpec with numpy using `tobytes()` -> `base64.encode` is the fastest way to parse tabular the data for most data sizes when using fastapi.
+
 The results are in the `server-test.csv` file, and the pivot tables are in the images below.
 
-Time took to parse the data in seconds:
+Time took to parse 10,000 sizes data in seconds:
 ![server-test-pivot-table-nomralize](./server-test-pivot-table-nomralize.png)
 ![server-test-pivot-table](./server-test-pivot-table.png)
 
 The results here are for various sizes of data:
 
+- response_class_type (`dataclass`, `pydantic`, `msgspec`)
 - field size of 2, 5, 10
 - data size of 100, 1k, 10k
 - parallel vs sequential (requesting methods)
@@ -51,6 +58,12 @@ The results here are for various sizes of data:
 - seed: 42
 
 each combination is tested 5 times with 20 iterations each, the seed is the same for all tests.
+
+## TODO
+
+- [x] compare between `async` and `sync` functions in fastapi
+- [x] Show all modes of data, `pydantic`, `dataclass`, `msgspec`
+- [ ] compare binary data using `application/octet-stream` and custom protocol
 
 ## Installation
 
@@ -95,7 +108,7 @@ pip install -r requirements.txt
 python -m uvicorn server:app --host localhost --port 8000
 ```
 
-7. Open `page.html` in your browser to interact with the application.
+7. Serve the `page.html` with live server to interact with the application.
 
 The `page.html` file is a simple HTML file that uses JavaScript to make test manually the seepd of parsing the data.
 
@@ -115,7 +128,7 @@ python -m uvicorn server:app --host localhost --port 8000
 python server-test.py
 ```
 
-3. Wait for the code to complete, should take a few minutes.
+3. Wait for the code to complete, should take a ~11 minutes.
 
 4. Open the `server-test.csv` using excel to the results.
 
