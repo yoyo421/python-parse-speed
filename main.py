@@ -51,3 +51,13 @@ size(np.array(numbers, dtype='>f').tobytes())
 size(struct.pack('%sf' % len(numbers), *numbers))
 np.array(numbers, dtype='<f').tobytes() == struct.pack('%sf' % len(numbers), *numbers)
 # %%
+def get_random_data(size: int, seed: int, fields: list[str]) -> dict[str, np.ndarray]:
+    random_state = np.random.RandomState(seed)
+    data = {
+        field: (random_state.rand(size) + random_state.randint(1_000_000, size=size)).astype(np.float32) for field in fields
+    }
+    return data
+# %%
+%%timeit
+get_random_data(10000, 42, [f'field{i}' for i in range(10)])
+# %%
