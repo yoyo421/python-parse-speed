@@ -187,7 +187,7 @@ class AIMSink {
   }
 
   /**
-   * @returns {Uint8Array}
+   * @returns {DataView}
    */
   _read_bytes_by_populated_size() {
     let fieldData = null;
@@ -195,17 +195,17 @@ class AIMSink {
       const buffer_can_alloc =
         this.buffer_populated_size -
         (this.buffer_populated_size % this.value_byte_size);
-      fieldData = this.bytes.subarray(0, buffer_can_alloc);
+      fieldData = new DataView(this.buffer, 0, buffer_can_alloc);
       this._reading_offset = buffer_can_alloc;
     } else {
-      fieldData = this.bytes.subarray(0, this.field_byte_length);
+      fieldData = new DataView(this.buffer, 0, this.field_byte_length);
       this._reading_offset = this.field_byte_length;
     }
     return fieldData;
   }
 
   /**
-   * @param {Uint8Array} data
+   * @param {DataView} data
    */
   _read_data(data) {
     switch (this.field_type) {
@@ -237,13 +237,12 @@ class AIMSink {
           );
         }
         const field = this.payload.fields[this.last_key];
-        const viewer = new DataView(data.buffer, 0, data.byteLength);
-        const viewer_length = viewer.byteLength;
+        const data_length = data.byteLength;
         let i_bytes = 0;
         let i = field.length - this.field_byte_length / this.value_byte_size;
-        while (i_bytes < viewer_length) {
+        while (i_bytes < data_length) {
           // LITTLE ENDIAN ONLY, change getFloat32 for other array field types
-          field[i] = viewer.getFloat32(i_bytes);
+          field[i] = data.getFloat32(i_bytes);
           i_bytes += this.value_byte_size;
           i++;
         }
