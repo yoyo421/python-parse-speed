@@ -102,27 +102,33 @@
         base64toFloat32Array,
         base64toFloat32ArrayWorker,
       } from "./base64toFloat32Array.worker.mjs";
+      import { parseBinaryData } from "./readBinary.worker.mjs";
       /**
        * @typedef ServerData
        *
        * @property {Record<string, number[] | string} data
        * @property {object} request
        */
-      const requestData = () => ({
-        method: "POST",
-        body: JSON.stringify({
-          size: document.getElementById("size").valueAsNumber,
-          seed: document.getElementById("seed").valueAsNumber,
-          fields: Array.from(
-            { length: document.getElementById("fields").valueAsNumber },
-            (_, i) => `field${i}`
-          ),
-          class_type: document.getElementById("class_type").value,
-        }),
-        headers: {
-          "Content-Type": "application/json",
-        },
-      });
+      const requestData = () => {
+        /** @type {RequestInit} */
+        const requestData = {
+          method: "POST",
+          body: JSON.stringify({
+            size: document.getElementById("size").valueAsNumber,
+            seed: document.getElementById("seed").valueAsNumber,
+            fields: Array.from(
+              { length: document.getElementById("fields").valueAsNumber },
+              (_, i) => `field${i}`
+            ),
+            class_type: document.getElementById("class_type").value,
+          }),
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            Accept: "application/json; charset=utf-8, application/octet-stream",
+          },
+        };
+        return requestData;
+      };
 
       const BytesFormat = new Intl.NumberFormat("en", {
         style: "unit",
@@ -153,35 +159,52 @@
           }`,
           requestData()
         );
-        const data = await response.json();
-        const workerPromises = [];
-        for (const key in data.data) {
-          const value = data.data[key];
-          if (typeof value === "string") {
-            if (!isWebWorker) {
-              const parseProcess = performance.now();
-              data.data[key] = [...base64toFloat32Array(value).values()];
-              const parseProcessEnd = performance.now();
-              performance.measure(`${key} - parseProcess`, {
-                start: parseProcess,
-                end: parseProcessEnd,
-              });
-            } else {
-              const parseProcess = performance.now();
-              workerPromises.push(
-                base64toFloat32ArrayWorker(value).then((v) => {
-                  data.data[key] = [...v.values()];
-                  const parseProcessEnd = performance.now();
-                  performance.measure(`${key} - parseProcess`, {
-                    start: parseProcess,
-                    end: parseProcessEnd,
-                  });
-                })
-              );
+        let data;
+        if (
+          response.headers.get("Content-Type").startsWith("application/json")
+        ) {
+          const parseProcess = performance.now();
+          const workerPromises = [];
+          data = await response.json();
+          for (const key in data.data) {
+            const value = data.data[key];
+            if (typeof value === "string") {
+              if (!isWebWorker) {
+                const parseProcessField = performance.now();
+                data.data[key] = [...base64toFloat32Array(value).values()];
+                const parseProcessFieldEnd = performance.now();
+                performance.measure(`${key} - parseProcess`, {
+                  start: parseProcessField,
+                  end: parseProcessFieldEnd,
+                });
+              } else {
+                const parseProcessField = performance.now();
+                workerPromises.push(
+                  base64toFloat32ArrayWorker(value).then((v) => {
+                    data.data[key] = [...v.values()];
+                    const parseProcessFieldEnd = performance.now();
+                    performance.measure(`${key} - parseProcess`, {
+                      start: parseProcessField,
+                      end: parseProcessFieldEnd,
+                    });
+                  })
+                );
+              }
             }
           }
+          await Promise.all(workerPromises);
+          const parseProcessEnd = performance.now();
+          performance.measure(`json - parseProcess`, {
+            start: parseProcess,
+            end: parseProcessEnd,
+          });
+        } else if (
+          response.headers
+            .get("Content-Type")
+            .startsWith("application/octet-stream")
+        ) {
+          data = await parseBinaryData(response.body);
         }
-        await Promise.all(workerPromises);
         const end = performance.now() / 1000;
         const speed = (end - start).toFixed(4);
 
@@ -194,7 +217,7 @@
         document.getElementById(
           isCompressed ? "compressed-speed" : "no-compressed-speed"
         ).textContent = `Speed: ${TimeFormat(speed)}, Size: ${BytesFormat(
-          response.headers.get("Content-Length")
+          response.headers.get("Content-Length") ?? data._size
         )}`;
       };
     </script>

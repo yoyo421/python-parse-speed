@@ -62,7 +62,7 @@ class ResponseTabularData_BINARY:
     1 byte: version (0x01)
     
     HEADER (per key or value):
-        - 1 byte: field type (1: key | utf8, 2: arr-float32)
+        - 1 byte: field type (0: key | utf8, 1: arr-float32)
         - 4 bytes: field length
             - for key | utf8: field name or length of the string, they are utf8 encoded both
             - for every arr-*: length of the array, the size for each item is known by field type
@@ -72,8 +72,8 @@ class ResponseTabularData_BINARY:
         - n bytes: json data (utf8, read until EOF)
         
     HEADERS:
-        - 1: key | utf8
-        - 2: arr-float32
+        - 0: key | utf8
+        - 1: arr-float32
 
     EOF HEADERS:
         <absent> no more data / streaming
@@ -118,9 +118,10 @@ class ResponseTabularData_BINARY:
                 yield self.decode_arr(len(value), value)
                 
         orjson_data = orjson.dumps(self.request)
-        yield b'201' + orjson_data # end of data
+        yield b'\xc9' + orjson_data # 201 + end of data
 
     def get_fastapi_response(self) -> StreamingResponse:
+        # return Response(b''.join(self._generate_buffer()), headers={"Content-Type": "application/octet-stream"})
         return StreamingResponse(self._generate_buffer(), headers={"Content-Type": "application/octet-stream"})
 
 C = TypeVar(
@@ -226,3 +227,5 @@ app.add_middleware(
 )
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# python -m uvicorn server:app --host 0.0.0.0 --port 8000 --reload
