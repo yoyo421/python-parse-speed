@@ -1,3 +1,4 @@
+/// <reference lib="webworker" />
 /**
  * @file readBinary.worker.js
  */
@@ -25,13 +26,15 @@ class AIMSink {
     NAN: -1,
     KEY_OR_UTF8: 0,
     ARR_FLOAT32: 1,
-    JSON: 201,
+    EOF: 200,
+    EOF_JSON: 201,
   };
   static FIELD_TYPE_SIZE = {
     [AIMSink.FIELD_TYPE.NAN]: 0,
     [AIMSink.FIELD_TYPE.KEY_OR_UTF8]: 1,
     [AIMSink.FIELD_TYPE.ARR_FLOAT32]: 4,
-    [AIMSink.FIELD_TYPE.JSON]: 1,
+    [AIMSink.FIELD_TYPE.EOF]: 0,
+    [AIMSink.FIELD_TYPE.EOF_JSON]: 1,
   };
   /**
    * @type {Record<number, (arr: any[], dataview: DataView, i: number, i_bytes: number) => void>}
@@ -47,7 +50,7 @@ class AIMSink {
     /**
      * @type {{
      *  fields: Record<string, any | any[]>,
-     * eof_data: any
+     *  eof_data: any
      * }}
      */
     this.payload = {
@@ -55,7 +58,8 @@ class AIMSink {
       eof_data: null,
     };
     this.decoder = new TextDecoder();
-    this.buffer_populated_size = 0;
+    /** buffer_populated_size */
+    this.bpsize = 0;
     this.stream_version = -1;
 
     this.last_key = "";
@@ -94,7 +98,7 @@ class AIMSink {
 
   reset() {
     this.payload = { fields: {}, eof_data: null };
-    this.buffer_populated_size = 0;
+    this.bpsize = 0;
     this.stream_version = -1;
     this.last_key = "";
     this.string_buffer = "";
@@ -108,7 +112,7 @@ class AIMSink {
 
   flag() {
     return [
-      this.buffer_populated_size,
+      this.bpsize,
       this.readmode,
       this.field_type,
       this.field_byte_length,
@@ -142,10 +146,10 @@ class AIMSink {
   }
 
   /**
-   * @returns {boolean}
+   * @returns {boolean} should we keep reading from current buffer
    */
   _read_stream_header() {
-    if (this.buffer_populated_size < 4) {
+    if (this.bpsize < 4) {
       throw new Error("Unexpected EOF");
     }
     const fileHeader = this.bytes.slice(this._reading_offset, 3);
@@ -163,18 +167,18 @@ class AIMSink {
   }
 
   /**
-   * @returns {boolean}
+   * @returns {boolean} should we keep reading from current buffer
    */
   _read_header() {
-    if (this.buffer_populated_size < 1) {
+    if (this.bpsize < 1) {
       return false;
     }
     this.field_type = this.viewer.getUint8(this._reading_offset);
     if (
-      this.field_type < AIMSink.FIELD_TYPE.JSON &&
+      this.field_type < AIMSink.FIELD_TYPE.EOF &&
       this.field_type > AIMSink.FIELD_TYPE.NAN
     ) {
-      if (this.buffer_populated_size < 5) {
+      if (this.bpsize < 5) {
         return false;
       }
       this.field_byte_length = this.viewer.getUint32(this._reading_offset + 1);
@@ -183,7 +187,7 @@ class AIMSink {
       if (this.field_type === AIMSink.FIELD_TYPE.KEY_OR_UTF8) {
         this.string_buffer = "";
       }
-    } else if (this.field_type >= AIMSink.FIELD_TYPE.JSON) {
+    } else if (this.field_type >= AIMSink.FIELD_TYPE.EOF) {
       this.readmode = AIMSink.READ_MODE.EOF;
       this._reading_offset += 1;
     }
@@ -197,10 +201,9 @@ class AIMSink {
    * @returns {number} bytes to read
    */
   _read_bytes_by_populated_size() {
-    if (this.buffer_populated_size < this.field_byte_length) {
+    if (this.bpsize < this.field_byte_length) {
       const buffer_can_alloc =
-        this.buffer_populated_size -
-        (this.buffer_populated_size % this.value_byte_size);
+        this.bpsize - (this.bpsize % this.value_byte_size);
       return buffer_can_alloc;
     } else {
       return this.field_byte_length;
@@ -271,16 +274,19 @@ class AIMSink {
 
   _read_eof() {
     switch (this.field_type) {
-      case AIMSink.FIELD_TYPE.JSON:
-        if (this.buffer_populated_size > 0) {
+      case AIMSink.FIELD_TYPE.EOF:
+        this._reading_offset += this.bpsize;
+        return;
+      case AIMSink.FIELD_TYPE.EOF_JSON:
+        if (this.bpsize > 0) {
           this.string_buffer += this.decoder.decode(
             this.bytes.subarray(
               this._reading_offset,
-              this._reading_offset + this.buffer_populated_size
+              this._reading_offset + this.bpsize
             ),
             { stream: true }
           );
-          this._reading_offset += this.buffer_populated_size;
+          this._reading_offset += this.bpsize;
         }
         return;
       default:
@@ -289,7 +295,7 @@ class AIMSink {
   }
 
   /**
-   * @returns {boolean}
+   * @returns {boolean} should we keep reading from current buffer
    */
   readFromBuffer() {
     this.debug(...this.flag());
@@ -328,16 +334,13 @@ class AIMSink {
     }
 
     // Remove delta from buffer_populated_size
-    this.buffer_populated_size -= this._reading_offset - _reading_position;
+    this.bpsize -= this._reading_offset - _reading_position;
 
-    // If we dont have enough data for the next read, we need to fetch more data
-    if (this.buffer_populated_size === 0) {
-      return false;
-    }
-    return true;
+    // Do we have more data to read?, if yes, continue reading, else return false
+    return this.bpsize > 0;
   }
 
-  // Move the buffer to the front
+  // Move the buffer to the front, hence we can write more data. also helps in debugging
   reset_reading_pos() {
     this.bytes.copyWithin(0, this._reading_offset);
     this._reading_offset = 0;
@@ -345,31 +348,47 @@ class AIMSink {
 
   /**
    * @param {Uint8Array} chunk
-   * @param {WritableStreamDefaultController<Uint8Array>} controller
+   * @param {{signal: AbortSignal}?} controller
    */
   write(chunk, controller) {
     this.debug("input chunk", chunk.byteLength);
     this.bytesRead += chunk.byteLength;
-    while (true && controller.signal.aborted === false) {
+    /**
+     * This act as while(true) loop,
+     *
+     * but we also need to check if the controller is aborted,
+     * but because we can manually run the function, controller can be null
+     *
+     * so the condition is:
+     *  true && (controller is not null && controller is not aborted)
+     * or in other words:
+     *  (controller is null || controller is not aborted)
+     */
+    while (!controller || controller.signal.aborted === false) {
+      // If we have read all the data, we can break the loop
       if (chunk.byteLength === 0) {
-        this.bytes.fill(0, this.buffer_populated_size); // FIXME: clear buffer, debug only, remove this line
+        this.bytes.fill(0, this.bpsize); // FIXME: clear buffer, debug only, remove this line
         break;
       }
-      const copy_size = this.buffer.byteLength - this.buffer_populated_size;
+      // Determine the size of the buffer we can copy
+      const copy_size = this.buffer.byteLength - this.bpsize;
+      // If the chunk is smaller than the buffer, we can copy the whole chunk
       if (chunk.byteLength < copy_size) {
-        this.bytes.fill(0, this.buffer_populated_size); // FIXME: clear buffer, debug only, remove this line
-        this.bytes.set(chunk, this.buffer_populated_size);
-        this.buffer_populated_size += chunk.byteLength;
+        this.bytes.fill(0, this.bpsize); // FIXME: clear buffer, debug only, remove this line
+        this.bytes.set(chunk, this.bpsize);
+        this.bpsize += chunk.byteLength;
+
+        // We read, if we have more data to read, we will continue reading
         while (this.readFromBuffer()) {}
         this.reset_reading_pos();
         break;
       } else {
-        this.bytes.set(
-          chunk.subarray(0, copy_size),
-          this.buffer_populated_size
-        );
-        this.buffer_populated_size += copy_size;
+        // If the chunk is bigger than the buffer, we will only copy the buffer available size
+        this.bytes.set(chunk.subarray(0, copy_size), this.bpsize);
+        this.bpsize += copy_size;
         chunk = chunk.subarray(copy_size);
+
+        // We read, if we have more data to read, we will continue reading
         while (this.readFromBuffer()) {}
         this.reset_reading_pos();
       }
@@ -397,7 +416,7 @@ class AIMSink {
 
   close() {
     if (this.readmode === AIMSink.READ_MODE.EOF) {
-      if (this.field_type === AIMSink.FIELD_TYPE.JSON) {
+      if (this.field_type === AIMSink.FIELD_TYPE.EOF_JSON) {
         this.payload.eof_data = JSON.parse(this.string_buffer);
       }
     }
@@ -416,11 +435,11 @@ class AIMSink {
   }
 }
 
-const sink = new AIMSink(1024 * 8);
+const sink = new AIMSink(1024);
 /**
  * Parses binary data from a readable stream.
  * @param {ReadableStream<Uint8Array>} stream - The readable stream containing binary data.
- * @returns {Promise<void>} A promise that resolves when the parsing is complete.
+ * @returns {Promise<any>} A promise that resolves when the parsing is complete.
  */
 export async function parseBinaryDataFromStream(stream) {
   if (stream instanceof ReadableStream && stream.locked) {

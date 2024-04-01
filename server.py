@@ -55,6 +55,18 @@ class ResponseTabularData_BINARY:
 
     This binary data is a key-value store. Each of the pair has HEADER, so
     a HEADER for key and HEADER for value
+
+    IDEAS:
+        headers for all single data, also a header for all array representation
+        for string[], specify the size of the array, then the size of each string in utf8
+                > size of the string element in utf8 decoded, max size is 2^16
+            0x00 0x00 <utf8> 0x00 0x00 <utf8> 0x00 0x00 <utf8>
+
+        boolean[], lets fit 8 booleans in a byte, a minimum of 1 byte
+    
+        for nested data (key-value), have header go inside and header go outside
+        
+        for custom[], specify the size of the array, then each element has a header and data
     
     The body looks like this (big endian):
 
@@ -63,7 +75,7 @@ class ResponseTabularData_BINARY:
     
     HEADER (per key or value):
         - 1 byte: field type (0: key | utf8, 1: arr-float32)
-        - 4 bytes: field length
+        - 4 bytes: field length unsigned int
             - for key | utf8: field name or length of the string, they are utf8 encoded both
             - for every arr-*: length of the array, the size for each item is known by field type
         - n bytes: field data (utf8 or arr-* data)
@@ -77,6 +89,7 @@ class ResponseTabularData_BINARY:
 
     EOF HEADERS:
         <absent> no more data / streaming
+        - 200: EOF
         - 201: json until EOF
         
     example:
