@@ -102,7 +102,10 @@
         base64toFloat32Array,
         base64toFloat32ArrayWorker,
       } from "./base64toFloat32Array.worker.mjs";
-      import { parseBinaryData } from "./readBinary.worker.mjs";
+      import {
+        parseBinaryDataFromStream,
+        parseBinaryData,
+      } from "./readBinary.worker.mjs";
       /**
        * @typedef ServerData
        *
@@ -203,7 +206,8 @@
             .get("Content-Type")
             .startsWith("application/octet-stream")
         ) {
-          data = await parseBinaryData(response.body);
+          // data = await parseBinaryData(await response.arrayBuffer());
+          data = await parseBinaryDataFromStream(response.body);
         }
         const end = performance.now() / 1000;
         const speed = (end - start).toFixed(4);

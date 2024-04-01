@@ -33,6 +33,13 @@ class AIMSink {
     [AIMSink.FIELD_TYPE.ARR_FLOAT32]: 4,
     [AIMSink.FIELD_TYPE.JSON]: 1,
   };
+  /**
+   * @type {Record<number, (arr: any[], dataview: DataView, i: number, i_bytes: number) => void>}
+   */
+  static FIELD_ARR_READER_FN = {
+    [AIMSink.FIELD_TYPE.ARR_FLOAT32]: (arr, dataview, i, i_bytes) =>
+      (arr[i] = dataview.getFloat32(i_bytes)),
+  };
   constructor(bufferSize = 1024 * 16) {
     this.buffer = new ArrayBuffer(bufferSize);
     this.bytes = new Uint8Array(this.buffer);
@@ -141,9 +148,9 @@ class AIMSink {
     if (this.buffer_populated_size < 4) {
       throw new Error("Unexpected EOF");
     }
-    const fileHeader = this.bytes.slice(0, 3);
-    this.stream_version = this.viewer.getUint8(3);
-    this._reading_offset = 4;
+    const fileHeader = this.bytes.slice(this._reading_offset, 3);
+    this.stream_version = this.viewer.getUint8(this._reading_offset + 3);
+    this._reading_offset += 4;
     if (this.decoder.decode(fileHeader) !== AIMSink.MAGIC) {
       throw new Error("Invalid magic number");
     }
@@ -162,7 +169,7 @@ class AIMSink {
     if (this.buffer_populated_size < 1) {
       return false;
     }
-    this.field_type = this.viewer.getUint8(0);
+    this.field_type = this.viewer.getUint8(this._reading_offset);
     if (
       this.field_type < AIMSink.FIELD_TYPE.JSON &&
       this.field_type > AIMSink.FIELD_TYPE.NAN
@@ -170,15 +177,15 @@ class AIMSink {
       if (this.buffer_populated_size < 5) {
         return false;
       }
-      this.field_byte_length = this.viewer.getUint32(1);
-      this._reading_offset = 5;
+      this.field_byte_length = this.viewer.getUint32(this._reading_offset + 1);
+      this._reading_offset += 5;
       this._next_readmode();
       if (this.field_type === AIMSink.FIELD_TYPE.KEY_OR_UTF8) {
         this.string_buffer = "";
       }
     } else if (this.field_type >= AIMSink.FIELD_TYPE.JSON) {
       this.readmode = AIMSink.READ_MODE.EOF;
-      this._reading_offset = 1;
+      this._reading_offset += 1;
     }
     // calculate field length
     this.value_byte_size = AIMSink.FIELD_TYPE_SIZE[this.field_type];
@@ -187,43 +194,49 @@ class AIMSink {
   }
 
   /**
-   * @returns {DataView}
+   * @returns {number} bytes to read
    */
   _read_bytes_by_populated_size() {
-    let fieldData = null;
     if (this.buffer_populated_size < this.field_byte_length) {
       const buffer_can_alloc =
         this.buffer_populated_size -
         (this.buffer_populated_size % this.value_byte_size);
-      fieldData = new DataView(this.buffer, 0, buffer_can_alloc);
-      this._reading_offset = buffer_can_alloc;
+      return buffer_can_alloc;
     } else {
-      fieldData = new DataView(this.buffer, 0, this.field_byte_length);
-      this._reading_offset = this.field_byte_length;
+      return this.field_byte_length;
     }
-    return fieldData;
   }
 
   /**
-   * @param {DataView} data
+   * @param {number} bytes_to_read
    */
-  _read_data(data) {
+  _read_data(bytes_to_read) {
     switch (this.field_type) {
       case AIMSink.FIELD_TYPE.KEY_OR_UTF8:
-        if (this.field_byte_length > data.byteLength) {
-          this.string_buffer += this.decoder.decode(data, {
+        const section = this.bytes.subarray(
+          this._reading_offset,
+          this._reading_offset + bytes_to_read
+        );
+        if (this.field_byte_length > bytes_to_read) {
+          this.string_buffer += this.decoder.decode(section, {
             stream: true,
           });
           return;
         }
-        this.string_buffer += this.decoder.decode(data, {
+        this.string_buffer += this.decoder.decode(section, {
           stream: false,
         });
         if (this.readmode === AIMSink.READ_MODE.DATA_KEY) {
           this.last_key = this.string_buffer;
           this.payload.fields[this.last_key] = null;
         } else if (this.readmode === AIMSink.READ_MODE.DATA_VALUE) {
-          this.payload.fields[this.last_key] = this.string_buffer;
+          switch (this.field_type) {
+            case AIMSink.FIELD_TYPE.KEY_OR_UTF8:
+              this.payload.fields[this.last_key] = this.string_buffer;
+              break;
+            default:
+              throw new Error("Invalid field type");
+          }
         } else {
           throw new Error("Invalid read mode");
         }
@@ -236,13 +249,17 @@ class AIMSink {
             this.field_byte_length / this.value_byte_size
           );
         }
+        const byteReader = AIMSink.FIELD_ARR_READER_FN[this.field_type];
+        // FIXME: This should never happen
+        if (!byteReader) {
+          throw new Error("Invalid field type");
+        }
         const field = this.payload.fields[this.last_key];
-        const data_length = data.byteLength;
-        let i_bytes = 0;
+        const read_bytes_to_here = this._reading_offset + bytes_to_read;
+        let i_bytes = this._reading_offset;
         let i = field.length - this.field_byte_length / this.value_byte_size;
-        while (i_bytes < data_length) {
-          // LITTLE ENDIAN ONLY, change getFloat32 for other array field types
-          field[i] = data.getFloat32(i_bytes);
+        while (i_bytes < read_bytes_to_here) {
+          byteReader(field, this.viewer, i, i_bytes);
           i_bytes += this.value_byte_size;
           i++;
         }
@@ -257,10 +274,13 @@ class AIMSink {
       case AIMSink.FIELD_TYPE.JSON:
         if (this.buffer_populated_size > 0) {
           this.string_buffer += this.decoder.decode(
-            this.bytes.subarray(0, this.buffer_populated_size),
+            this.bytes.subarray(
+              this._reading_offset,
+              this._reading_offset + this.buffer_populated_size
+            ),
             { stream: true }
           );
-          this._reading_offset = this.buffer_populated_size;
+          this._reading_offset += this.buffer_populated_size;
         }
         return;
       default:
@@ -273,7 +293,7 @@ class AIMSink {
    */
   readFromBuffer() {
     this.debug(...this.flag());
-    this._reading_offset = 0;
+    const _reading_position = this._reading_offset;
     switch (this.readmode) {
       case AIMSink.READ_MODE.MAGIC:
         if (!this._read_stream_header()) {
@@ -288,9 +308,10 @@ class AIMSink {
         break;
       case AIMSink.READ_MODE.DATA_KEY:
       case AIMSink.READ_MODE.DATA_VALUE:
-        const fieldData = this._read_bytes_by_populated_size();
-        this._read_data(fieldData);
-        this.field_byte_length -= fieldData.byteLength;
+        const bytes_to_read = this._read_bytes_by_populated_size();
+        this._read_data(bytes_to_read);
+        this._reading_offset += bytes_to_read;
+        this.field_byte_length -= bytes_to_read;
         if (this.field_byte_length === 0) {
           this._next_readmode();
         }
@@ -302,19 +323,24 @@ class AIMSink {
         throw new Error("Invalid readmode");
     }
     // If we didnt read anything, we need to fetch more data
-    if (this._reading_offset === 0) {
+    if (_reading_position === this._reading_offset) {
       return false;
     }
 
-    // Move the buffer to the front
-    this.buffer_populated_size -= this._reading_offset;
-    this.bytes.copyWithin(0, this._reading_offset);
+    // Remove delta from buffer_populated_size
+    this.buffer_populated_size -= this._reading_offset - _reading_position;
 
     // If we dont have enough data for the next read, we need to fetch more data
     if (this.buffer_populated_size === 0) {
       return false;
     }
     return true;
+  }
+
+  // Move the buffer to the front
+  reset_reading_pos() {
+    this.bytes.copyWithin(0, this._reading_offset);
+    this._reading_offset = 0;
   }
 
   /**
@@ -335,6 +361,7 @@ class AIMSink {
         this.bytes.set(chunk, this.buffer_populated_size);
         this.buffer_populated_size += chunk.byteLength;
         while (this.readFromBuffer()) {}
+        this.reset_reading_pos();
         break;
       } else {
         this.bytes.set(
@@ -344,6 +371,7 @@ class AIMSink {
         this.buffer_populated_size += copy_size;
         chunk = chunk.subarray(copy_size);
         while (this.readFromBuffer()) {}
+        this.reset_reading_pos();
       }
     }
   }
@@ -394,7 +422,7 @@ const sink = new AIMSink(1024 * 8);
  * @param {ReadableStream<Uint8Array>} stream - The readable stream containing binary data.
  * @returns {Promise<void>} A promise that resolves when the parsing is complete.
  */
-export async function parseBinaryData(stream) {
+export async function parseBinaryDataFromStream(stream) {
   if (stream instanceof ReadableStream && stream.locked) {
     throw new Error("The stream is not a byte stream");
   }
@@ -410,4 +438,30 @@ export async function parseBinaryData(stream) {
     request: sink.payload.eof_data,
     _size: sink.bytesRead,
   };
+}
+
+/**
+ * @param {ArrayBuffer} arrayBuffer
+ */
+export async function parseBinaryData(arrayBuffer) {
+  try {
+    const buff = new Uint8Array(arrayBuffer);
+    const parseProcess = performance.now();
+    sink.reset();
+    sink.start({ error() {} });
+    sink.write(buff, { signal: { aborted: false } });
+    sink.close();
+    const parseProcessEnd = performance.now();
+    performance.measure(`binary - parseProcess`, {
+      start: parseProcess,
+      end: parseProcessEnd,
+    });
+    return {
+      data: sink.payload.fields,
+      request: sink.payload.eof_data,
+      _size: sink.bytesRead,
+    };
+  } catch (e) {
+    sink.abort(e);
+  }
 }
