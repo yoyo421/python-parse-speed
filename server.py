@@ -11,21 +11,13 @@ import pydantic
 import msgspec
 import orjson
 from typing import Any, Final, Generator, Literal, TypeVar
+import math
 
 router = APIRouter()
 
-CLASS_TYPE = Literal['dataclass', 'pydantic', 'msgspec', 'binary']
-
-@dataclasses.dataclass
-class RequestTabularData:
-    size: int
-    seed: int
-    fields: list[str]
-    class_type: CLASS_TYPE
-
 @dataclasses.dataclass
 class ResponseTabularData_DATACLASS:
-    data: dict[str, list[float] | str]
+    data: dict[str, list[float] | str | list[bool]]
     # moking a non tabular data, response times 10
     request: list[dict]
 
@@ -33,7 +25,7 @@ class ResponseTabularData_DATACLASS:
         return Response(orjson.dumps(dataclasses.asdict(self)), headers={"Content-Type": "application/json"})
     
 class ResponseTabularData_PYDANTIC(pydantic.BaseModel):
-    data: dict[str, list[float] | str]
+    data: dict[str, list[float] | str | list[bool]]
     # moking a non tabular data, response times 10
     request: list[dict]
 
@@ -41,14 +33,14 @@ class ResponseTabularData_PYDANTIC(pydantic.BaseModel):
         return Response(self.model_dump_json(), headers={"Content-Type": "application/json"})
     
 class ResponseTabularData_MSGSPEC(msgspec.Struct):
-    data: dict[str, list[float] | str]
+    data: dict[str, list[float] | str | list[bool]]
     # moking a non tabular data, response times 10
     request: list[dict]
 
     def get_fastapi_response(self) -> Response:
         return Response(msgspec.json.encode(self), headers={"Content-Type": "application/json"})
 
-@dataclasses.dataclass()
+@dataclasses.dataclass
 class ResponseTabularData_BINARY:
     """
     Binary data:
@@ -74,8 +66,10 @@ class ResponseTabularData_BINARY:
     1 byte: version (0x01)
     
     HEADER (per key or value):
-        - 1 byte: field type (0: key | utf8, 1: arr-float32)
-        - 4 bytes: field length unsigned int
+        - 1 byte: field type
+        if arr type (arr-*) or utf8:
+            - 4 bytes: field length unsigned int
+            - for single fixed value field types: this doesnt exist
             - for key | utf8: field name or length of the string, they are utf8 encoded both
             - for every arr-*: length of the array, the size for each item is known by field type
         - n bytes: field data (utf8 or arr-* data)
@@ -84,8 +78,12 @@ class ResponseTabularData_BINARY:
         - n bytes: json data (utf8, read until EOF)
         
     HEADERS:
-        - 0: key | utf8
-        - 1: arr-float32
+        - (field type, field data)
+        - 0: key | uint8
+        - 1: key | uint16
+        - 2: key | uint32
+        - 3: key | utf8
+        - 4: arr-float32
 
     EOF HEADERS:
         <absent> no more data / streaming
@@ -94,16 +92,16 @@ class ResponseTabularData_BINARY:
         
     example:
         AIM\x01                                                                 # magic number and version
-        \x00\x00\x00\x00\x06field1                                              # key: field1
-        \x01\x00\x00\x00\x02                                                    # arr-float32 size 2
+        \x02\x00\x00\x00\x06field1                                              # key: field1
+        \x03\x00\x00\x00\x02                                                    # arr-float32 size 2
         ?\x80\x00\x00@\x00\x00\x00                                              # 1.0, 2.0
-        \x00\x00\x00\x00\x06field2                                              # key: field2
-        \x01\x00\x00\x00\x02                                                    # arr-float32 size 2
+        \x02\x00\x00\x00\x06field2                                              # key: field2
+        \x03\x00\x00\x00\x02                                                    # arr-float32 size 2
         @@\x00\x00@\x80\x00\x00                                                 # 3.0, 4.0
         \x01\x00\x00\x00\rempty_field\xd7\x92                                   # key: empty_fieldת
         \xc9{"im_json": true, "hello": "javascript", "\xd7\xaa": "utf-8 support"}  # end of data
     """
-    data: dict[str, list[float] | str]
+    data: dict[str, list[float] | str | list[bool]]
     # moking a non tabular data, response times 10
     request: list[dict]
 
@@ -111,45 +109,74 @@ class ResponseTabularData_BINARY:
 
     def decode_str(self, txt: str) -> bytes:
         txt_bytes = txt.encode('utf-8')
-        return struct.pack('!BI', 0, len(txt_bytes)) + txt_bytes
+        return struct.pack('!BI', 6, len(txt_bytes)) + txt_bytes
     
     def decode_arr(self, size: int, arr: list[Any]) -> bytes:
         if len(arr) == 0:
-            return struct.pack('!BI', 1, 0)
+            return struct.pack('!BI', 8, 0)
+        if isinstance(arr, np.ndarray) and arr.dtype == np.bool_:
+            size = (len(arr) - len(arr) % 8) + 8
+            _arr = np.zeros(size, dtype=np.bool_)
+            _arr[:] = arr.flatten()
+            _bytes = (_arr.reshape(-1, 8) * np.array([1, 2, 4, 8, 16, 32, 64, 128], dtype=np.uint8)).tobytes()
+            return struct.pack('!BI', 9, size) + _bytes
+        if isinstance(arr[0], bool):
+            _bytes = bytearray(math.ceil(len(arr) / 8))
+            for pos, i in enumerate(range(0, len(arr), 8)):
+                for j, v in enumerate(arr[i:i+8]):
+                    _bytes[pos] |= int(v) << j
+            return struct.pack('!BI', 9, size) + _bytes
         if isinstance(arr[0], float):
-            return struct.pack('!BI', 1, size) + struct.pack(f'!{size}f', *arr)
+            return struct.pack('!BI', 10, size) + struct.pack(f'!{size}f', *arr)
         raise ValueError(f"Unknown type {type(arr[0])} for field {self._current_field} to parse")
 
     def _generate_buffer(self) -> Generator[bytes, None, None]:
         yield b'AIM\x01' # magic number and version
         for field, value in self.data.items():
             self._current_field = field
-            yield self.decode_str(field)
+            if isinstance(field, str): # utf8
+                 yield self.decode_str(field)
+            elif isinstance(field, int): # uint32 or uint16
+                yield struct.pack('!BI', 0, field)
             if isinstance(value, str): # utf8
                 yield self.decode_str(value)
             elif isinstance(value, list): # arr-*
                 yield self.decode_arr(len(value), value)
-                
+
         orjson_data = orjson.dumps(self.request)
         yield b'\xc9' + orjson_data # 201 + end of data
 
     def get_fastapi_response(self) -> StreamingResponse:
-        # return Response(b''.join(self._generate_buffer()), headers={"Content-Type": "application/octet-stream"})
+        return Response(b''.join(self._generate_buffer()), headers={"Content-Type": "application/octet-stream"})
+
+class ResponseTabularData_BINARY_STREAMING(ResponseTabularData_BINARY):
+    def get_fastapi_response(self) -> StreamingResponse:
         return StreamingResponse(self._generate_buffer(), headers={"Content-Type": "application/octet-stream"})
+
+CLASS_TYPE = Literal['dataclass', 'pydantic', 'msgspec', 'binary', 'binary-streaming']
+
+@dataclasses.dataclass
+class RequestTabularData:
+    size: int
+    seed: int
+    fields: list[str]
+    class_type: CLASS_TYPE
 
 C = TypeVar(
     'C', 
     ResponseTabularData_DATACLASS, 
     ResponseTabularData_PYDANTIC, 
     ResponseTabularData_MSGSPEC,
-    ResponseTabularData_BINARY
+    ResponseTabularData_BINARY,
+    ResponseTabularData_BINARY_STREAMING
 )
 
 RESPONSE_CLASSES_BY_TYPE: Final[dict[CLASS_TYPE, C]] = {
     'dataclass': ResponseTabularData_DATACLASS,
     'pydantic': ResponseTabularData_PYDANTIC,
     'msgspec': ResponseTabularData_MSGSPEC,
-    'binary': ResponseTabularData_BINARY
+    'binary': ResponseTabularData_BINARY,
+    'binary-streaming': ResponseTabularData_BINARY_STREAMING
 }
 
 def raw_factory(cls: C, data: dict[str, np.ndarray], requests: RequestTabularData) -> C:
