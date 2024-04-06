@@ -113,21 +113,21 @@ class ResponseTabularData_BINARY:
     
     def decode_arr(self, size: int, arr: list[Any]) -> bytes:
         if len(arr) == 0:
-            return struct.pack('!BI', 8, 0)
+            return struct.pack('!BI', 10, 0)
         if isinstance(arr, np.ndarray) and arr.dtype == np.bool_:
             size = (len(arr) - len(arr) % 8) + 8
             _arr = np.zeros(size, dtype=np.bool_)
             _arr[:] = arr.flatten()
             _bytes = (_arr.reshape(-1, 8) * np.array([1, 2, 4, 8, 16, 32, 64, 128], dtype=np.uint8)).tobytes()
-            return struct.pack('!BI', 9, size) + _bytes
+            return struct.pack('!BI', 11, size) + _bytes
         if isinstance(arr[0], bool):
             _bytes = bytearray(math.ceil(len(arr) / 8))
             for pos, i in enumerate(range(0, len(arr), 8)):
                 for j, v in enumerate(arr[i:i+8]):
                     _bytes[pos] |= int(v) << j
-            return struct.pack('!BI', 9, size) + _bytes
+            return struct.pack('!BI', 11, size) + _bytes
         if isinstance(arr[0], float):
-            return struct.pack('!BI', 10, size) + struct.pack(f'!{size}f', *arr)
+            return struct.pack('!BI', 12, size) + struct.pack(f'!{size}f', *arr)
         raise ValueError(f"Unknown type {type(arr[0])} for field {self._current_field} to parse")
 
     def _generate_buffer(self) -> Generator[bytes, None, None]:
@@ -147,6 +147,9 @@ class ResponseTabularData_BINARY:
         yield b'\xc9' + orjson_data # 201 + end of data
 
     def get_fastapi_response(self) -> StreamingResponse:
+        # with open('.aimbin.bin', 'wb') as f:
+        #     for chunk in self._generate_buffer():
+        #         f.write(chunk)
         return Response(b''.join(self._generate_buffer()), headers={"Content-Type": "application/octet-stream"})
 
 class ResponseTabularData_BINARY_STREAMING(ResponseTabularData_BINARY):

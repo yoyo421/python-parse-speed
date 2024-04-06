@@ -1,12 +1,78 @@
-/// <reference lib="webworker" />
+// @ts-check
 /**
  * @file readBinary.worker.js
  */
 
-/**
- * @type {WorkerGlobalScope}
- */
-const self = globalThis;
+class Node {
+  /** @type {{} | []} */
+  value;
+  /** @type {Node | null} */
+  prev;
+
+  /**
+   * @param {{} | []} value
+   */
+  constructor(value) {
+    this.value = value;
+    this.prev = null;
+  }
+
+  add_next(node) {
+    node.prev = this;
+  }
+
+  remove() {
+    this.prev = null;
+  }
+}
+
+class Payload {
+  constructor() {
+    this.data = new Node({});
+    this.eof_data = null;
+  }
+
+  set_field(key, value) {
+    this.data.value[key] = value;
+  }
+
+  get_field(key) {
+    return this.data.value[key];
+  }
+
+  /**
+   *
+   * @param {string | null} key
+   * @param {{} | [] | undefined | null} value
+   * @returns
+   */
+  enter_scope(key, value = null) {
+    const node = new Node(value ? value : {});
+    // if (key in this.data.value) node = new Node(this.data.value[key]);
+    // else node = new Node({});
+    this.data.add_next(node);
+    if (key) this.data.value[key] = node.value;
+    this.data = node;
+    return node.value;
+  }
+
+  /** @returns {boolean} success */
+  exit_scope() {
+    const current = this.data;
+    if (current.prev) {
+      this.data = current.prev;
+      current.remove();
+      return true;
+    }
+    return false;
+  }
+
+  clear() {
+    while (this.exit_scope()) {}
+    this.data = new Node({});
+    this.eof_data = null;
+  }
+}
 
 /**
  * @implements {UnderlyingSink<Uint8Array>}
@@ -22,6 +88,7 @@ export class AIMSink {
     DATA_VALUE: 4,
     EOF: 5,
   };
+  // This should be the same with the encoder
   static FIELD_TYPE = {
     NAN: -1,
     UINT8: 0,
@@ -31,25 +98,29 @@ export class AIMSink {
     INT16: 4,
     INT32: 5,
     KEY_OR_UTF8: 6,
-    BOOL: 7,
-    ARR_UINT8: 8,
-    ARR_BOOL: 9,
-    ARR_FLOAT32: 10,
-    ARR_DOUBLE: 11,
+    FLOAT32: 7,
+    DOUBLE: 8,
+    BOOL: 9,
+    ARR_UINT8: 10,
+    ARR_BOOL: 11,
+    ARR_FLOAT32: 12,
+    ARR_DOUBLE: 13,
     EOF: 200,
     EOF_JSON: 201,
   };
   static FIELD_TYPE_SIZE = {
     [AIMSink.FIELD_TYPE.NAN]: 0,
-    // single value are 1
-    [AIMSink.FIELD_TYPE.UINT8]: 1,
-    [AIMSink.FIELD_TYPE.UINT16]: 1,
-    [AIMSink.FIELD_TYPE.KEY_OR_UINT32]: 1,
-    [AIMSink.FIELD_TYPE.INT8]: 1,
-    [AIMSink.FIELD_TYPE.INT16]: 1,
-    [AIMSink.FIELD_TYPE.INT32]: 1,
-    [AIMSink.FIELD_TYPE.KEY_OR_UTF8]: 1,
-    [AIMSink.FIELD_TYPE.BOOL]: 1,
+    // single value are always 0
+    [AIMSink.FIELD_TYPE.UINT8]: 0,
+    [AIMSink.FIELD_TYPE.UINT16]: 0,
+    [AIMSink.FIELD_TYPE.KEY_OR_UINT32]: 0,
+    [AIMSink.FIELD_TYPE.INT8]: 0,
+    [AIMSink.FIELD_TYPE.INT16]: 0,
+    [AIMSink.FIELD_TYPE.INT32]: 0,
+    [AIMSink.FIELD_TYPE.KEY_OR_UTF8]: 0,
+    [AIMSink.FIELD_TYPE.FLOAT32]: 0,
+    [AIMSink.FIELD_TYPE.DOUBLE]: 0,
+    [AIMSink.FIELD_TYPE.BOOL]: 0,
     // array values
     [AIMSink.FIELD_TYPE.ARR_UINT8]: 1,
     [AIMSink.FIELD_TYPE.ARR_BOOL]: 1 / 8,
@@ -77,7 +148,7 @@ export class AIMSink {
 
       if (i8 + 8 > field_length) {
         for (let j = 0; i8 + j < field_length; j++) {
-          arr[i8 + j] = byte & (1 << j !== 0);
+          arr[i8 + j] = (byte & (1 << j)) !== 0;
         }
       }
 
@@ -106,12 +177,13 @@ export class AIMSink {
   };
   /**
    * If an array need special treatment after writing, we can define it here
-   * @type {Record<number, (arr: any[]) => any[]}
+   * @type {Record<number, (arr: any[]) => any[]>}
    */
   static FIELD_ARR_CLOSER = {
     [AIMSink.FIELD_TYPE.ARR_BOOL]: (arr) => {
-      const result = new Array(arr.length);
-      for (let i = 0; i < arr.length; i++) result[i] = arr[i] !== 0;
+      const length = arr.length;
+      const result = new Array(length);
+      for (let i = 0; i < length; i++) result[i] = arr[i] !== 0;
       return result;
     },
   };
@@ -124,22 +196,9 @@ export class AIMSink {
     this.bytes = new Uint8Array(this.buffer);
     this.viewer = new DataView(this.buffer);
     /**
-     * @type {{
-     *  fields: Record<any, any>
-     *  eof_data: any
-     *  set_field: (key: any, value: any) => void
-     *  get_field: (key: any) => any
-     *  clear_fields: () => void
-     * }}
+     * @type {Payload}
      */
-    this.payload = {
-      fields: {},
-      eof_data: null,
-    };
-
-    this.payload.set_field = (key, value) => (this.payload.fields[key] = value);
-    this.payload.get_field = (key) => this.payload.fields[key];
-    this.payload.clear_fields = () => (this.payload.fields = {});
+    this.payload = new Payload();
 
     this.decoder = new TextDecoder();
     /** buffer_populated_size */
@@ -157,11 +216,9 @@ export class AIMSink {
     /**
      * Fields can span multiple packets, so we need to keep track of the length.
      *
-     * For single value items, this is the value itself.
+     * For single value items, this is the value itself. this includes 64-bit values
      *
-     * For 64-bit values, this value act as the first 32-bit (big endian)
-     *
-     * In static languages, this is 4 bytes
+     * In static languages, this is 8 bytes, and it is versitile to store any numeric value, so 64-bit is the default
      */
     this.field_length = 0;
     this.field_byte_length = 0;
@@ -190,11 +247,13 @@ export class AIMSink {
 
     /** @type {readonly [AIMSink]} */
     this.ptr = [this];
+
+    /** @type {(...args) => void}  */
+    this.debug = false ? console.log : () => {};
   }
 
   reset() {
-    this.payload.clear_fields();
-    this.payload.eof_data = null;
+    this.payload.clear();
     this.bpsize = 0;
     this.stream_version = -1;
     this.last_key = null;
@@ -217,12 +276,6 @@ export class AIMSink {
       this.field_length,
       this.field_byte_length,
     ];
-  }
-
-  debug(...args) {
-    if (false) {
-      console.log(...args);
-    }
   }
 
   _next_readmode() {
@@ -301,6 +354,21 @@ export class AIMSink {
         this.field_length = this.viewer.getUint32(this._reading_offset + 1);
         this._reading_offset += 5;
         break;
+      case AIMSink.FIELD_TYPE.FLOAT32:
+        if (this.bpsize < 5) {
+          return false;
+        }
+        this.field_length = this.viewer.getFloat32(this._reading_offset + 1);
+        this._reading_offset += 5;
+        break;
+      // Special case for double, because it is 8 bytes
+      case AIMSink.FIELD_TYPE.DOUBLE:
+        if (this.bpsize < 9) {
+          return false;
+        }
+        this.field_length = this.viewer.getFloat64(this._reading_offset + 1);
+        this._reading_offset += 9;
+        break;
       case AIMSink.FIELD_TYPE.EOF:
       case AIMSink.FIELD_TYPE.EOF_JSON:
         this.readmode = AIMSink.READ_MODE.EOF;
@@ -366,6 +434,10 @@ export class AIMSink {
       case AIMSink.FIELD_TYPE.KEY_OR_UINT32:
       case AIMSink.FIELD_TYPE.INT32:
         this._set_data_value(this.field_length & 0xffffffff);
+        return AIMSink.READ_DATA_RETURN_FLAGS.READ_INPLACE;
+      case AIMSink.FIELD_TYPE.FLOAT32:
+      case AIMSink.FIELD_TYPE.DOUBLE:
+        this._set_data_value(this.field_length);
         return AIMSink.READ_DATA_RETURN_FLAGS.READ_INPLACE;
       case AIMSink.FIELD_TYPE.KEY_OR_UTF8:
         const section = this.bytes.subarray(
@@ -479,6 +551,7 @@ export class AIMSink {
       case AIMSink.READ_MODE.DATA_KEY:
       case AIMSink.READ_MODE.DATA_VALUE:
         const bytes_to_read = this._read_bytes_by_populated_size();
+        this._read_data(bytes_to_read);
         switch (this._read_data(bytes_to_read)) {
           case AIMSink.READ_DATA_RETURN_FLAGS.READ_INPLACE:
             this._next_readmode();
@@ -591,6 +664,7 @@ export class AIMSink {
         this.payload.eof_data = JSON.parse(this.string_buffer);
       }
     }
+    while (this.payload.exit_scope()) {}
     this.readmode = AIMSink.READ_MODE.MAGIC;
     this.status = 0;
     this.debug("closed");
@@ -606,11 +680,15 @@ export class AIMSink {
   }
 }
 
-let sink = new AIMSink(1024);
+let sink = new AIMSink(1024 * 16);
 /**
  * Parses binary data from a readable stream.
  * @param {ReadableStream<Uint8Array>} stream - The readable stream containing binary data.
- * @returns {Promise<any>} A promise that resolves when the parsing is complete.
+ * @returns {Promise<{
+ *  data: Record<any, any>,
+ *  request: any,
+ *  _size: number
+ * } | undefined>} A promise that resolves when the parsing is complete.
  */
 export async function parseBinaryDataFromStream(stream) {
   if (stream instanceof ReadableStream && stream.locked) {
@@ -625,7 +703,7 @@ export async function parseBinaryDataFromStream(stream) {
       end: parseProcessEnd,
     });
     return {
-      data: sink.payload.fields,
+      data: sink.payload.data.value,
       request: sink.payload.eof_data,
       _size: sink.bytesRead,
     };
@@ -652,7 +730,7 @@ export async function parseBinaryData(arrayBuffer) {
       end: parseProcessEnd,
     });
     return {
-      data: sink.payload.fields,
+      data: sink.payload.data.value,
       request: sink.payload.eof_data,
       _size: sink.bytesRead,
     };

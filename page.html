@@ -207,7 +207,13 @@
             .startsWith("application/octet-stream")
         ) {
           // data = await parseBinaryData(await response.arrayBuffer());
-          data = await parseBinaryDataFromStream(response.body);
+          if (
+            document.getElementById("class_type").value === "binary-streaming"
+          ) {
+            data = await parseBinaryDataFromStream(response.body);
+          } else {
+            data = await parseBinaryData(await response.arrayBuffer());
+          }
         }
         const end = performance.now() / 1000;
         const speed = (end - start).toFixed(4);
