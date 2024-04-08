@@ -3,18 +3,23 @@
  * @file readBinary.worker.js
  */
 
+/** @template {{} | []} T */
 class Node {
-  /** @type {{} | []} */
+  /** @type {T} */
   value;
   /** @type {Node | null} */
   prev;
+  /** @type {FieldMetadata} */
+  metadata;
 
   /**
-   * @param {{} | []} value
+   * @param {T} value
+   * @param {FieldMetadata} metadata
    */
-  constructor(value) {
+  constructor(value, metadata) {
     this.value = value;
     this.prev = null;
+    this.metadata = metadata;
   }
 
   add_next(node) {
@@ -26,9 +31,14 @@ class Node {
   }
 }
 
-class Payload {
+/**
+ * @template {any[] | {}} T
+ */
+class FieldConstructor {
   constructor() {
-    this.data = new Node({});
+    /** @type {Node<T>} */
+    // @ts-ignore
+    this.data = new Node({}, new FieldMetadata());
     this.eof_data = null;
   }
 
@@ -42,16 +52,23 @@ class Payload {
 
   /**
    *
-   * @param {string | null} key
-   * @param {{} | [] | undefined | null} value
-   * @returns
+   * @param {string | number | null} key
+   * @param {T} value
+   * @returns {T}
    */
-  enter_scope(key, value = null) {
-    const node = new Node(value ? value : {});
+  enter_scope(key, value) {
+    const node = new Node(
+      value,
+      new FieldMetadata(
+        Array.isArray(value)
+          ? AIMSink.FIELD_MODE.ARRAY
+          : AIMSink.FIELD_MODE.OBJECT
+      )
+    );
     // if (key in this.data.value) node = new Node(this.data.value[key]);
     // else node = new Node({});
     this.data.add_next(node);
-    if (key) this.data.value[key] = node.value;
+    if (key) this.set_field(key, node.value);
     this.data = node;
     return node.value;
   }
@@ -69,12 +86,69 @@ class Payload {
 
   clear() {
     while (this.exit_scope()) {}
-    this.data = new Node({});
+    this.data.remove();
+    // @ts-ignore
+    this.data.value = {};
+    this.data.metadata.reset();
     this.eof_data = null;
   }
 }
 
 /**
+ * Little bit insane, but we can change it to DataView
+ */
+class FieldMetadata {
+  /**
+   * @param {number} mode
+   */
+  constructor(mode = AIMSink.FIELD_MODE.OBJECT) {
+    this.type = AIMSink.FIELD_TYPE.NAN;
+    this.mode = mode;
+    this.last_key = null;
+    /**
+     * Fields can span multiple packets, so we need to keep track of the length.
+     *
+     * For single value items, this is the value itself. this includes 64-bit values
+     *
+     * In static languages, this is 8 bytes, and it is versitile to store any numeric value, so 64-bit is the default
+     */
+    this.length = 0;
+    this.byte_length = 0;
+    this.value_size_in_bytes = 1;
+    this.value_byte_size = 1;
+  }
+
+  reset() {
+    this.type = AIMSink.FIELD_TYPE.NAN;
+    this.last_key = null;
+    this.length = 0;
+    this.byte_length = 0;
+    this.value_size_in_bytes = 1;
+    this.value_byte_size = 1;
+  }
+
+  /**
+   * @param {DataView} view
+   * @param {number} offset
+   */
+  set_field_type_from_dataview(view, offset) {
+    this.type = view.getUint8(offset);
+  }
+
+  /**
+   * calculate field length
+   */
+  process_field_type() {
+    this.value_size_in_bytes = AIMSink.FIELD_TYPE_SIZE[this.type];
+    this.value_byte_size = Math.ceil(this.value_size_in_bytes);
+    this.byte_length = Math.ceil(this.length * this.value_size_in_bytes);
+  }
+}
+
+/**
+ *
+ * TODO: add events for object capture and stuff
+ *
  * @implements {UnderlyingSink<Uint8Array>}
  */
 export class AIMSink {
@@ -82,45 +156,60 @@ export class AIMSink {
   static VERSION = 1;
   static READ_MODE = {
     MAGIC: 0,
-    HEADER_KEY: 1,
-    HEADER_VALUE: 2,
-    DATA_KEY: 3,
-    DATA_VALUE: 4,
+    KEY_FOR_HEADER: 1,
+    KEY_FOR_VALUE: 2,
+    DATA_FOR_HEADER: 3,
+    DATA_FOR_VALUE: 4,
     EOF: 5,
   };
   // This should be the same with the encoder
+  static FIELD_MODE = {
+    OBJECT: 0,
+    ARRAY: 1,
+  };
   static FIELD_TYPE = {
     NAN: -1,
     UINT8: 0,
     UINT16: 1,
+    /** available on `AIMSink.FIELD_MODE.OBJECT` or `AIMSink.FIELD_MODE.ARRAY` */
     KEY_OR_UINT32: 2,
     INT8: 3,
     INT16: 4,
     INT32: 5,
+    /** available on `AIMSink.FIELD_MODE.OBJECT` */
     KEY_OR_UTF8: 6,
     FLOAT32: 7,
     DOUBLE: 8,
     BOOL: 9,
-    ARR_UINT8: 10,
-    ARR_BOOL: 11,
-    ARR_FLOAT32: 12,
-    ARR_DOUBLE: 13,
+    OBJECT: 10,
+    OBJECT_OR_ARR_CUSTOM_CLOSE: 12,
+    /**
+     * Custom implementation of array, each item can be different, always DATA_KEY -> DATA_VALUE till END OF ARRAY
+     */
+    ARR_CUSTOM: 13,
+    ARR_UINT8: 15,
+    ARR_BOOL: 16,
+    ARR_FLOAT32: 17,
+    ARR_DOUBLE: 18,
     EOF: 200,
     EOF_JSON: 201,
   };
   static FIELD_TYPE_SIZE = {
     [AIMSink.FIELD_TYPE.NAN]: 0,
-    // single value are always 0
-    [AIMSink.FIELD_TYPE.UINT8]: 0,
-    [AIMSink.FIELD_TYPE.UINT16]: 0,
-    [AIMSink.FIELD_TYPE.KEY_OR_UINT32]: 0,
-    [AIMSink.FIELD_TYPE.INT8]: 0,
-    [AIMSink.FIELD_TYPE.INT16]: 0,
-    [AIMSink.FIELD_TYPE.INT32]: 0,
-    [AIMSink.FIELD_TYPE.KEY_OR_UTF8]: 0,
-    [AIMSink.FIELD_TYPE.FLOAT32]: 0,
-    [AIMSink.FIELD_TYPE.DOUBLE]: 0,
-    [AIMSink.FIELD_TYPE.BOOL]: 0,
+    // single value are always 1
+    [AIMSink.FIELD_TYPE.UINT8]: 1,
+    [AIMSink.FIELD_TYPE.UINT16]: 1,
+    [AIMSink.FIELD_TYPE.KEY_OR_UINT32]: 1,
+    [AIMSink.FIELD_TYPE.INT8]: 1,
+    [AIMSink.FIELD_TYPE.INT16]: 1,
+    [AIMSink.FIELD_TYPE.INT32]: 1,
+    [AIMSink.FIELD_TYPE.KEY_OR_UTF8]: 1,
+    [AIMSink.FIELD_TYPE.FLOAT32]: 1,
+    [AIMSink.FIELD_TYPE.DOUBLE]: 1,
+    [AIMSink.FIELD_TYPE.BOOL]: 1,
+    [AIMSink.FIELD_TYPE.OBJECT]: 1,
+    [AIMSink.FIELD_TYPE.ARR_CUSTOM]: 1,
+    [AIMSink.FIELD_TYPE.OBJECT_OR_ARR_CUSTOM_CLOSE]: 1,
     // array values
     [AIMSink.FIELD_TYPE.ARR_UINT8]: 1,
     [AIMSink.FIELD_TYPE.ARR_BOOL]: 1 / 8,
@@ -170,6 +259,7 @@ export class AIMSink {
    * @type {Record<number, new (length: number) => RelativeIndexable>}
    */
   static FIELD_ARR_CONSTRUCTOR = {
+    [AIMSink.FIELD_TYPE.ARR_CUSTOM]: Array,
     [AIMSink.FIELD_TYPE.ARR_UINT8]: Uint8Array,
     [AIMSink.FIELD_TYPE.ARR_BOOL]: Uint8Array,
     [AIMSink.FIELD_TYPE.ARR_FLOAT32]: Float32Array,
@@ -186,6 +276,12 @@ export class AIMSink {
       for (let i = 0; i < length; i++) result[i] = arr[i] !== 0;
       return result;
     },
+    // [AIMSink.FIELD_TYPE.ARR_FLOAT32]: (arr) => {
+    //   const length = arr.length;
+    //   const result = new Array(length);
+    //   for (let i = 0; i < length; i++) result[i] = arr[i];
+    //   return result;
+    // },
   };
   static READ_DATA_RETURN_FLAGS = {
     CONTINUE_READING: 0,
@@ -196,9 +292,9 @@ export class AIMSink {
     this.bytes = new Uint8Array(this.buffer);
     this.viewer = new DataView(this.buffer);
     /**
-     * @type {Payload}
+     * @type {FieldConstructor}
      */
-    this.payload = new Payload();
+    this.payload = new FieldConstructor();
 
     this.decoder = new TextDecoder();
     /** buffer_populated_size */
@@ -206,22 +302,7 @@ export class AIMSink {
     this.stream_version = -1;
 
     /** @type {string | number | null} */
-    this.last_key = null;
     this.string_buffer = "";
-
-    this.field_type = AIMSink.FIELD_TYPE.NAN;
-
-    this.value_size_in_bytes = 1;
-    this.value_byte_size = 1;
-    /**
-     * Fields can span multiple packets, so we need to keep track of the length.
-     *
-     * For single value items, this is the value itself. this includes 64-bit values
-     *
-     * In static languages, this is 8 bytes, and it is versitile to store any numeric value, so 64-bit is the default
-     */
-    this.field_length = 0;
-    this.field_byte_length = 0;
 
     /**
      * 0: reading magic number & version \
@@ -256,13 +337,7 @@ export class AIMSink {
     this.payload.clear();
     this.bpsize = 0;
     this.stream_version = -1;
-    this.last_key = null;
     this.string_buffer = "";
-    this.field_type = AIMSink.FIELD_TYPE.NAN;
-    this.value_size_in_bytes = 8;
-    this.value_byte_size = 1;
-    this.field_length = 0;
-    this.field_byte_length = 0;
     this.readmode = AIMSink.READ_MODE.MAGIC;
     this.bytesRead = 0;
     this._reading_offset = 0;
@@ -272,28 +347,28 @@ export class AIMSink {
     return [
       this.bpsize,
       this.readmode,
-      this.field_type,
-      this.field_length,
-      this.field_byte_length,
+      this.payload.data.metadata.type,
+      this.payload.data.metadata.length,
+      this.payload.data.metadata.byte_length,
     ];
   }
 
   _next_readmode() {
     switch (this.readmode) {
       case AIMSink.READ_MODE.MAGIC:
-        this.readmode = AIMSink.READ_MODE.HEADER_KEY;
+        this.readmode = AIMSink.READ_MODE.KEY_FOR_HEADER;
         break;
-      case AIMSink.READ_MODE.HEADER_KEY:
-        this.readmode = AIMSink.READ_MODE.DATA_KEY;
+      case AIMSink.READ_MODE.KEY_FOR_HEADER:
+        this.readmode = AIMSink.READ_MODE.DATA_FOR_HEADER;
         break;
-      case AIMSink.READ_MODE.DATA_KEY:
-        this.readmode = AIMSink.READ_MODE.HEADER_VALUE;
+      case AIMSink.READ_MODE.DATA_FOR_HEADER:
+        this.readmode = AIMSink.READ_MODE.KEY_FOR_VALUE;
         break;
-      case AIMSink.READ_MODE.HEADER_VALUE:
-        this.readmode = AIMSink.READ_MODE.DATA_VALUE;
+      case AIMSink.READ_MODE.KEY_FOR_VALUE:
+        this.readmode = AIMSink.READ_MODE.DATA_FOR_VALUE;
         break;
-      case AIMSink.READ_MODE.DATA_VALUE:
-        this.readmode = AIMSink.READ_MODE.HEADER_KEY;
+      case AIMSink.READ_MODE.DATA_FOR_VALUE:
+        this.readmode = AIMSink.READ_MODE.KEY_FOR_HEADER;
         break;
     }
   }
@@ -314,7 +389,7 @@ export class AIMSink {
     if (this.stream_version > AIMSink.VERSION) {
       throw new Error("Invalid version number");
     }
-    this.readmode = AIMSink.READ_MODE.HEADER_KEY;
+    this.readmode = AIMSink.READ_MODE.KEY_FOR_HEADER;
     this.debug(AIMSink.MAGIC, AIMSink.VERSION, this.stream_version);
     return true;
   }
@@ -327,64 +402,141 @@ export class AIMSink {
     if (this.bpsize < 1) {
       return false;
     }
-    this.field_type = this.viewer.getUint8(this._reading_offset);
+    const field_info = this.payload.data.metadata;
+
+    // Special case for field mode array, we already know the key
+    if (
+      field_info.mode === AIMSink.FIELD_MODE.ARRAY &&
+      this.readmode === AIMSink.READ_MODE.KEY_FOR_HEADER
+    ) {
+      this.readmode = AIMSink.READ_MODE.KEY_FOR_VALUE;
+      return true;
+    }
+
+    const viewer = this.viewer;
+    field_info.type = viewer.getUint8(this._reading_offset);
     // add switch for field type
-    switch (this.field_type) {
-      case AIMSink.FIELD_TYPE.INT8:
-      case AIMSink.FIELD_TYPE.INT16:
-      case AIMSink.FIELD_TYPE.INT32:
-        if (this.bpsize < 5) {
-          return false;
-        }
-        this.field_length = this.viewer.getInt32(this._reading_offset + 1);
-        this._reading_offset += 5;
-        break;
-      case AIMSink.FIELD_TYPE.UINT8:
-      case AIMSink.FIELD_TYPE.UINT16:
-      case AIMSink.FIELD_TYPE.KEY_OR_UINT32:
-      case AIMSink.FIELD_TYPE.KEY_OR_UTF8:
-      case AIMSink.FIELD_TYPE.BOOL:
-      case AIMSink.FIELD_TYPE.ARR_UINT8:
-      case AIMSink.FIELD_TYPE.ARR_BOOL:
-      case AIMSink.FIELD_TYPE.ARR_FLOAT32:
-      case AIMSink.FIELD_TYPE.ARR_DOUBLE:
-        if (this.bpsize < 5) {
-          return false;
-        }
-        this.field_length = this.viewer.getUint32(this._reading_offset + 1);
-        this._reading_offset += 5;
-        break;
-      case AIMSink.FIELD_TYPE.FLOAT32:
-        if (this.bpsize < 5) {
-          return false;
-        }
-        this.field_length = this.viewer.getFloat32(this._reading_offset + 1);
-        this._reading_offset += 5;
-        break;
-      // Special case for double, because it is 8 bytes
-      case AIMSink.FIELD_TYPE.DOUBLE:
-        if (this.bpsize < 9) {
-          return false;
-        }
-        this.field_length = this.viewer.getFloat64(this._reading_offset + 1);
-        this._reading_offset += 9;
-        break;
-      case AIMSink.FIELD_TYPE.EOF:
-      case AIMSink.FIELD_TYPE.EOF_JSON:
-        this.readmode = AIMSink.READ_MODE.EOF;
-        this._reading_offset += 1;
-        break;
-      default:
-        throw new Error("Invalid field type");
+    if (this.readmode === AIMSink.READ_MODE.KEY_FOR_HEADER) {
+      switch (field_info.type) {
+        case AIMSink.FIELD_TYPE.KEY_OR_UINT32:
+          if (this.bpsize < 5) return false;
+
+          this._next_readmode();
+          this._set_data_value(viewer.getUint32(this._reading_offset + 1));
+          this._reading_offset += 5;
+          break;
+        case AIMSink.FIELD_TYPE.KEY_OR_UTF8:
+          if (this.bpsize < 5) return false;
+
+          field_info.length = viewer.getUint32(this._reading_offset + 1);
+          this._reading_offset += 5;
+          break;
+        case AIMSink.FIELD_TYPE.EOF:
+        case AIMSink.FIELD_TYPE.EOF_JSON:
+          this.readmode = AIMSink.READ_MODE.EOF;
+          this._reading_offset += 1;
+          break;
+        case AIMSink.FIELD_TYPE.OBJECT_OR_ARR_CUSTOM_CLOSE:
+          this._reading_offset += 1;
+          this.payload.exit_scope();
+          this.readmode = AIMSink.READ_MODE.DATA_FOR_VALUE; // we finished reading the object
+          break;
+        default:
+          throw new Error("Invalid field type for key");
+      }
+    } else {
+      switch (field_info.type) {
+        case AIMSink.FIELD_TYPE.INT8:
+          if (this.bpsize < 5) return false;
+
+          this._next_readmode();
+          this._set_data_value(viewer.getInt8(this._reading_offset + 1));
+          this._reading_offset += 2;
+          break;
+        case AIMSink.FIELD_TYPE.INT16:
+          if (this.bpsize < 5) return false;
+
+          this._next_readmode();
+          this._set_data_value(viewer.getInt16(this._reading_offset + 1));
+          this._reading_offset += 3;
+          break;
+        case AIMSink.FIELD_TYPE.INT32:
+          if (this.bpsize < 5) return false;
+
+          this._next_readmode();
+          this._set_data_value(viewer.getInt32(this._reading_offset + 1));
+          this._reading_offset += 5;
+          break;
+        case AIMSink.FIELD_TYPE.BOOL:
+          if (this.bpsize < 2) return false;
+
+          this._next_readmode();
+          this._set_data_value(viewer.getUint8(this._reading_offset + 1) == 1);
+          this._reading_offset += 2;
+          break;
+        case AIMSink.FIELD_TYPE.UINT8:
+          if (this.bpsize < 2) return false;
+
+          this._next_readmode();
+          this._set_data_value(viewer.getUint8(this._reading_offset + 1));
+          this._reading_offset += 2;
+          break;
+        case AIMSink.FIELD_TYPE.UINT16:
+          if (this.bpsize < 2) return false;
+
+          this._next_readmode();
+          this._set_data_value(viewer.getUint16(this._reading_offset + 1));
+          this._reading_offset += 3;
+          break;
+        case AIMSink.FIELD_TYPE.KEY_OR_UINT32:
+          if (this.bpsize < 5) return false;
+
+          this._next_readmode();
+          this._set_data_value(viewer.getUint32(this._reading_offset + 1));
+          this._reading_offset += 5;
+          break;
+        // Special case for double, because it is 8 bytes
+        case AIMSink.FIELD_TYPE.FLOAT32:
+          if (this.bpsize < 5) return false;
+
+          this._next_readmode();
+          this._set_data_value(viewer.getFloat32(this._reading_offset + 1));
+          this._reading_offset += 5;
+          break;
+        case AIMSink.FIELD_TYPE.DOUBLE:
+          if (this.bpsize < 9) return false;
+
+          this._next_readmode();
+          this._set_data_value(viewer.getFloat64(this._reading_offset + 1));
+          this._reading_offset += 9;
+          break;
+        case AIMSink.FIELD_TYPE.KEY_OR_UTF8:
+        case AIMSink.FIELD_TYPE.ARR_CUSTOM:
+        case AIMSink.FIELD_TYPE.ARR_UINT8:
+        case AIMSink.FIELD_TYPE.ARR_BOOL:
+        case AIMSink.FIELD_TYPE.ARR_FLOAT32:
+        case AIMSink.FIELD_TYPE.ARR_DOUBLE:
+        case AIMSink.FIELD_TYPE.ARR_STRING:
+          if (this.bpsize < 5) return false;
+
+          field_info.length = viewer.getUint32(this._reading_offset + 1);
+          this._reading_offset += 5;
+          break;
+        case AIMSink.FIELD_TYPE.OBJECT:
+          this.payload.enter_scope(field_info.last_key, {});
+          this._reading_offset += 1;
+          this.readmode = AIMSink.READ_MODE.DATA_FOR_VALUE; // we finished reading the object
+          break;
+        case AIMSink.FIELD_TYPE.OBJECT_OR_ARR_CUSTOM_CLOSE:
+          this._reading_offset += 1;
+          break;
+        default:
+          throw new Error("Invalid field type for value");
+      }
     }
     this.string_buffer = "";
     this._next_readmode();
-    // calculate field length
-    this.value_size_in_bytes = AIMSink.FIELD_TYPE_SIZE[this.field_type];
-    this.value_byte_size = Math.ceil(this.value_size_in_bytes);
-    this.field_byte_length = Math.ceil(
-      this.field_length * this.value_size_in_bytes
-    );
+    field_info.process_field_type();
     return true;
   }
 
@@ -392,22 +544,27 @@ export class AIMSink {
    * @returns {number} bytes to read
    */
   _read_bytes_by_populated_size() {
-    if (this.bpsize < this.field_byte_length) {
+    const field_info = this.payload.data.metadata;
+    if (this.bpsize < field_info.byte_length) {
       const buffer_can_alloc =
-        this.bpsize - (this.bpsize % this.value_byte_size);
+        this.bpsize - (this.bpsize % field_info.value_byte_size);
       return buffer_can_alloc;
     } else {
-      return this.field_byte_length;
+      return field_info.byte_length;
     }
   }
 
   _set_data_value(value) {
+    const field_info = this.payload.data.metadata;
     switch (this.readmode) {
-      case AIMSink.READ_MODE.DATA_KEY:
-        this.last_key = value;
+      case AIMSink.READ_MODE.DATA_FOR_HEADER:
+        field_info.last_key = value;
         return;
-      case AIMSink.READ_MODE.DATA_VALUE:
-        this.payload.set_field(this.last_key, value);
+      case AIMSink.READ_MODE.DATA_FOR_VALUE:
+        this.payload.set_field(field_info.last_key, value);
+        if (field_info.mode === AIMSink.FIELD_MODE.ARRAY) {
+          field_info.last_key++;
+        }
         return;
       default:
         throw new Error("Invalid read mode");
@@ -416,35 +573,19 @@ export class AIMSink {
 
   /**
    * @param {number} bytes_to_read
+   * @param {FieldMetadata} field_info
    * @returns {number} `READ_DATA_RETURN_FLAGS` should we keep reading from current buffer
    */
-  _read_data(bytes_to_read) {
-    switch (this.field_type) {
-      case AIMSink.FIELD_TYPE.BOOL:
-        this._set_data_value(this.field_length === 1);
-        return AIMSink.READ_DATA_RETURN_FLAGS.READ_INPLACE;
-      case AIMSink.FIELD_TYPE.UINT8:
-      case AIMSink.FIELD_TYPE.INT8:
-        this._set_data_value(this.field_length & 0xff);
-        return AIMSink.READ_DATA_RETURN_FLAGS.READ_INPLACE;
-      case AIMSink.FIELD_TYPE.UINT16:
-      case AIMSink.FIELD_TYPE.INT16:
-        this._set_data_value(this.field_length & 0xffff);
-        return AIMSink.READ_DATA_RETURN_FLAGS.READ_INPLACE;
-      case AIMSink.FIELD_TYPE.KEY_OR_UINT32:
-      case AIMSink.FIELD_TYPE.INT32:
-        this._set_data_value(this.field_length & 0xffffffff);
-        return AIMSink.READ_DATA_RETURN_FLAGS.READ_INPLACE;
-      case AIMSink.FIELD_TYPE.FLOAT32:
-      case AIMSink.FIELD_TYPE.DOUBLE:
-        this._set_data_value(this.field_length);
-        return AIMSink.READ_DATA_RETURN_FLAGS.READ_INPLACE;
+  _read_data(bytes_to_read, field_info) {
+    const field_type = field_info.type;
+    const field_length_or_value = field_info.length;
+    switch (field_type) {
       case AIMSink.FIELD_TYPE.KEY_OR_UTF8:
         const section = this.bytes.subarray(
           this._reading_offset,
           this._reading_offset + bytes_to_read
         );
-        if (this.field_byte_length > bytes_to_read) {
+        if (field_info.byte_length > bytes_to_read) {
           this.string_buffer += this.decoder.decode(section, {
             stream: true,
           });
@@ -461,37 +602,41 @@ export class AIMSink {
       case AIMSink.FIELD_TYPE.ARR_BOOL:
       case AIMSink.FIELD_TYPE.ARR_FLOAT32:
       case AIMSink.FIELD_TYPE.ARR_DOUBLE:
-        if (!this.payload.get_field(this.last_key)) {
+        if (!this.payload.get_field(field_info.last_key)) {
           this.payload.set_field(
-            this.last_key,
-            new AIMSink.FIELD_ARR_CONSTRUCTOR[this.field_type](
-              this.field_length
-            )
+            field_info.last_key,
+            new AIMSink.FIELD_ARR_CONSTRUCTOR[field_type](field_info.length)
           );
         }
-        const byteReader = AIMSink.FIELD_ARR_READER_FN[this.field_type];
+        const byteReader = AIMSink.FIELD_ARR_READER_FN[field_type];
         // FIXME: This should never happen
         if (!byteReader) {
           throw new Error("Invalid field type");
         }
-        const field = this.payload.get_field(this.last_key);
+        const field = this.payload.get_field(field_info.last_key);
         const read_bytes_to_here = this._reading_offset + bytes_to_read;
         let i_bytes = this._reading_offset;
-        let i = field.length - this.field_length;
+        let i = field.length - field_info.length;
         const args = {
           arr: field,
           dataview: this.viewer,
           i,
           i_bytes,
           bytes: this.bytes,
-          field_length: this.field_length,
+          field_length: field_length_or_value,
         };
         while (i_bytes < read_bytes_to_here) {
           byteReader(args);
-          args.i_bytes = i_bytes += this.value_byte_size;
+          args.i_bytes = i_bytes += field_info.value_byte_size;
           args.i = ++i;
         }
         break;
+      case AIMSink.FIELD_TYPE.ARR_CUSTOM:
+        const constructor = AIMSink.FIELD_ARR_CONSTRUCTOR[field_type];
+        const arr = new constructor(field_info.length);
+        this.payload.enter_scope(field_info.last_key, arr);
+        this.payload.data.metadata.last_key = 0;
+        return AIMSink.READ_DATA_RETURN_FLAGS.READ_INPLACE;
       default:
         throw new Error("Invalid field type");
     }
@@ -499,18 +644,20 @@ export class AIMSink {
   }
 
   _close_array_field() {
-    if (AIMSink.FIELD_ARR_CLOSER.hasOwnProperty(this.field_type)) {
-      const field = this.payload.get_field(this.last_key);
+    const field_info = this.payload.data.metadata;
+    if (AIMSink.FIELD_ARR_CLOSER.hasOwnProperty(field_info.type)) {
+      const field = this.payload.get_field(field_info.last_key);
       this.payload.set_field(
-        this.last_key,
-        AIMSink.FIELD_ARR_CLOSER[this.field_type](field)
+        field_info.last_key,
+        AIMSink.FIELD_ARR_CLOSER[field_info.type](field)
       );
     }
   }
 
   _read_eof() {
-    switch (this.field_type) {
+    switch (this.payload.data.metadata.type) {
       case AIMSink.FIELD_TYPE.EOF:
+        // Maybe reset so we can read another object
         this._reading_offset += this.bpsize;
         return;
       case AIMSink.FIELD_TYPE.EOF_JSON:
@@ -536,31 +683,31 @@ export class AIMSink {
   readFromBuffer() {
     this.debug(...this.flag());
     const _reading_position = this._reading_offset;
+    const field_info = this.payload.data.metadata;
     readmode_switch: switch (this.readmode) {
       case AIMSink.READ_MODE.MAGIC:
         if (!this._read_stream_header()) {
           return false;
         }
         break;
-      case AIMSink.READ_MODE.HEADER_KEY:
-      case AIMSink.READ_MODE.HEADER_VALUE:
+      case AIMSink.READ_MODE.KEY_FOR_HEADER:
+      case AIMSink.READ_MODE.KEY_FOR_VALUE:
         if (!this._read_header()) {
           return false;
         }
         break;
-      case AIMSink.READ_MODE.DATA_KEY:
-      case AIMSink.READ_MODE.DATA_VALUE:
+      case AIMSink.READ_MODE.DATA_FOR_HEADER:
+      case AIMSink.READ_MODE.DATA_FOR_VALUE:
         const bytes_to_read = this._read_bytes_by_populated_size();
-        this._read_data(bytes_to_read);
-        switch (this._read_data(bytes_to_read)) {
+        switch (this._read_data(bytes_to_read, field_info)) {
           case AIMSink.READ_DATA_RETURN_FLAGS.READ_INPLACE:
             this._next_readmode();
             break readmode_switch;
           case AIMSink.READ_DATA_RETURN_FLAGS.CONTINUE_READING:
             this._reading_offset += bytes_to_read;
-            this.field_byte_length -= bytes_to_read;
-            this.field_length -= bytes_to_read / this.value_size_in_bytes;
-            if (this.field_length <= 0) {
+            field_info.byte_length -= bytes_to_read;
+            field_info.length -= bytes_to_read / field_info.value_size_in_bytes;
+            if (field_info.length <= 0) {
               this._close_array_field();
               this._next_readmode();
             }
@@ -573,15 +720,15 @@ export class AIMSink {
         throw new Error("Invalid readmode");
     }
     // If we didnt read anything, we need to fetch more data
-    if (_reading_position === this._reading_offset) {
-      return false;
-    }
+    // if (_reading_position === this._reading_offset) {
+    //   return false;
+    // }
 
     // Remove delta from buffer_populated_size
     this.bpsize -= this._reading_offset - _reading_position;
 
     // Do we have more data to read?, if yes, continue reading, else return false
-    return this.bpsize > 0;
+    return this.bpsize > 16; //threshold
   }
 
   // Move the buffer to the front, hence we can write more data. also helps in debugging
@@ -660,7 +807,7 @@ export class AIMSink {
 
   close() {
     if (this.readmode === AIMSink.READ_MODE.EOF) {
-      if (this.field_type === AIMSink.FIELD_TYPE.EOF_JSON) {
+      if (this.payload.data.metadata.type === AIMSink.FIELD_TYPE.EOF_JSON) {
         this.payload.eof_data = JSON.parse(this.string_buffer);
       }
     }
@@ -698,6 +845,7 @@ export async function parseBinaryDataFromStream(stream) {
     const parseProcess = performance.now();
     await stream.pipeTo(sink.getWriter());
     const parseProcessEnd = performance.now();
+    console.log("Took:", parseProcessEnd - parseProcess);
     performance.measure(`binary - parseProcess`, {
       start: parseProcess,
       end: parseProcessEnd,
@@ -722,13 +870,16 @@ export async function parseBinaryData(arrayBuffer) {
     const parseProcess = performance.now();
     sink.reset();
     sink.start({ error() {} });
-    sink.write(buff, { signal: { aborted: false } });
+    const control = new AbortController();
+    setTimeout(() => control.abort(), 10000);
+    sink.write(buff, control);
     sink.close();
     const parseProcessEnd = performance.now();
     performance.measure(`binary - parseProcess`, {
       start: parseProcess,
       end: parseProcessEnd,
     });
+    console.log("Took:", parseProcessEnd - parseProcess);
     return {
       data: sink.payload.data.value,
       request: sink.payload.eof_data,

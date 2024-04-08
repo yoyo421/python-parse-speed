@@ -107,10 +107,26 @@ class ResponseTabularData_BINARY:
 
     _current_field: str = dataclasses.field(default=None, init=False)
 
-    def decode_str(self, txt: str) -> bytes:
-        txt_bytes = txt.encode('utf-8')
-        return struct.pack('!BI', 6, len(txt_bytes)) + txt_bytes
-    
+    def decode_value(self, value: Any) -> bytes:
+        if isinstance(value, str):
+            txt_bytes = value.encode('utf-8')
+            return struct.pack('!BI', 6, len(txt_bytes)) + txt_bytes
+        if isinstance(value, list):
+            return self.decode_arr(len(value), value)
+        if isinstance(value, bool):
+            return struct.pack('!BB', 9, value)
+        if isinstance(value, float):
+            return struct.pack('!Bf', 7, value)
+        if isinstance(value, np.double):
+            return struct.pack('!Bd', 8, value)
+        if isinstance(value, np.uint32):
+            return struct.pack('!BI', 2, value)
+        if isinstance(value, (np.int32, int)):
+            return struct.pack('!Bi', 5, value)
+        if isinstance(value, np.uint16):
+            return struct.pack('!BH', 1, value)
+        raise ValueError(f"Unknown type {type(value)} for field {self._current_field} to parse")
+
     def decode_arr(self, size: int, arr: list[Any]) -> bytes:
         if len(arr) == 0:
             return struct.pack('!BI', 10, 0)
@@ -119,32 +135,77 @@ class ResponseTabularData_BINARY:
             _arr = np.zeros(size, dtype=np.bool_)
             _arr[:] = arr.flatten()
             _bytes = (_arr.reshape(-1, 8) * np.array([1, 2, 4, 8, 16, 32, 64, 128], dtype=np.uint8)).tobytes()
-            return struct.pack('!BI', 11, size) + _bytes
+            return struct.pack('!BI', 16, size) + _bytes
         if isinstance(arr[0], bool):
             _bytes = bytearray(math.ceil(len(arr) / 8))
             for pos, i in enumerate(range(0, len(arr), 8)):
                 for j, v in enumerate(arr[i:i+8]):
                     _bytes[pos] |= int(v) << j
-            return struct.pack('!BI', 11, size) + _bytes
+            return struct.pack('!BI', 16, size) + _bytes
         if isinstance(arr[0], float):
-            return struct.pack('!BI', 12, size) + struct.pack(f'!{size}f', *arr)
+            return struct.pack('!BI', 17, size) + struct.pack(f'!{size}f', *arr)
         raise ValueError(f"Unknown type {type(arr[0])} for field {self._current_field} to parse")
 
     def _generate_buffer(self) -> Generator[bytes, None, None]:
         yield b'AIM\x01' # magic number and version
+        # yield self.decode_value('string')
+        # yield self.decode_value('Lorem ipsum dolor sit amet.')
+        # yield self.decode_value('uint32')
+        # yield self.decode_value(np.uint32(9000))
+
+        # yield self.decode_value('inner')
+        # yield struct.pack('!B', 10)
+
+        # yield self.decode_value('int32')
+        # yield self.decode_value(np.int32(20161110))
+        # yield self.decode_value('innerInner')
+        # yield struct.pack('!B', 10)
+
+        # yield self.decode_value('long')
+        # yield struct.pack('!B', 10)
+        # yield self.decode_value('low')
+        # yield self.decode_value(1051)
+        # yield self.decode_value('high')
+        # yield self.decode_value(151234)
+        # yield self.decode_value('unsigned')
+        # yield self.decode_value(False)
+        # yield struct.pack('!B', 12)
+        # yield self.decode_value('enum')
+        # yield self.decode_value(np.uint16(1))
+        # yield self.decode_value('int32')
+        # yield self.decode_value(np.int32(-42))
+        # yield struct.pack('!B', 12)
+        # yield self.decode_value('outer')
+        # yield struct.pack('!B', 10)
+        # yield self.decode_value('bool')
+        # yield self.decode_value([True,False,False,True,False,False,True])
+        # yield self.decode_value('double')
+        # yield self.decode_value(np.double(204.8))
+        # yield struct.pack('!B', 12)
+        # yield struct.pack('!B', 12)
+        # yield self.decode_value('float')
+        # yield self.decode_value(0.25)
+        # yield struct.pack('!B', 200)
+        # return
+
+        # yield self.decode_value('bool')
+        # yield self.decode_value(True)
+        # yield self.decode_value('test123')
+        # yield self.decode_arr(2, [1.0, 2.0])
+        # yield self.decode_value('nest')
+        # yield struct.pack('!B', 10)
+        # yield self.decode_value('nested_field')
+        # yield struct.pack('!BI', 13, 2) + self.decode_value('nested_value') + self.decode_value('nested_value')
+        # yield struct.pack('!B', 12)
         for field, value in self.data.items():
             self._current_field = field
-            if isinstance(field, str): # utf8
-                 yield self.decode_str(field)
-            elif isinstance(field, int): # uint32 or uint16
-                yield struct.pack('!BI', 0, field)
-            if isinstance(value, str): # utf8
-                yield self.decode_str(value)
-            elif isinstance(value, list): # arr-*
-                yield self.decode_arr(len(value), value)
+            yield self.decode_value(field)
+            yield self.decode_value(value)
+        yield struct.pack('!B', 200)
+        return
 
         orjson_data = orjson.dumps(self.request)
-        yield b'\xc9' + orjson_data # 201 + end of data
+        yield bytes([200]) + orjson_data # 201 + end of data
 
     def get_fastapi_response(self) -> StreamingResponse:
         # with open('.aimbin.bin', 'wb') as f:
