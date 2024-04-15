@@ -188,19 +188,20 @@ class ResponseTabularData_BINARY:
         # yield struct.pack('!B', 200)
         # return
 
-        # yield self.decode_value('bool')
-        # yield self.decode_value(True)
-        # yield self.decode_value('test123')
-        # yield self.decode_arr(2, [1.0, 2.0])
-        # yield self.decode_value('nest')
-        # yield struct.pack('!B', 10)
-        # yield self.decode_value('nested_field')
-        # yield struct.pack('!BI', 13, 2) + self.decode_value('nested_value') + self.decode_value('nested_value')
-        # yield struct.pack('!B', 12)
-        for field, value in self.data.items():
-            self._current_field = field
-            yield self.decode_value(field)
-            yield self.decode_value(value)
+        yield self.decode_value('bool')
+        yield self.decode_value(True)
+        yield self.decode_value('test123')
+        yield self.decode_arr(2, [1.0, 2.0])
+        yield self.decode_value('nest')
+        yield struct.pack('!B', 10)
+        yield self.decode_value('nested_field')
+        yield self.decode_value('nested_field')
+        # yield struct.pack('!BI', 13, 3) + self.decode_value('nested_value') + self.decode_value('nested_value')  + self.decode_value('nested_value')
+        yield struct.pack('!B', 12)
+        # for field, value in self.data.items():
+        #     self._current_field = field
+        #     yield self.decode_value(field)
+        #     yield self.decode_value(value)
         yield struct.pack('!B', 200)
         return
 

@@ -31,6 +31,8 @@ class Node {
   }
 }
 
+const TypedArray = Object.getPrototypeOf(Int8Array);
+
 /**
  * @template {any[] | {}} T
  */
@@ -60,7 +62,7 @@ class FieldConstructor {
     const node = new Node(
       value,
       new FieldMetadata(
-        Array.isArray(value)
+        Array.isArray(value) || value instanceof TypedArray
           ? AIMSink.FIELD_MODE.ARRAY
           : AIMSink.FIELD_MODE.OBJECT
       )
@@ -146,6 +148,16 @@ class FieldMetadata {
 }
 
 /**
+ * @template T
+ * @param {Record<string, T>} ENUM
+ * @param {T} value
+ * @returns
+ */
+function getENUMName(ENUM, value) {
+  return Object.keys(ENUM).find((key) => ENUM[key] === value);
+}
+
+/**
  *
  * TODO: add events for object capture and stuff
  *
@@ -198,14 +210,14 @@ export class AIMSink {
     [AIMSink.FIELD_TYPE.NAN]: 0,
     // single value are always 1
     [AIMSink.FIELD_TYPE.UINT8]: 1,
-    [AIMSink.FIELD_TYPE.UINT16]: 1,
-    [AIMSink.FIELD_TYPE.KEY_OR_UINT32]: 1,
+    [AIMSink.FIELD_TYPE.UINT16]: 2,
+    [AIMSink.FIELD_TYPE.KEY_OR_UINT32]: 4,
     [AIMSink.FIELD_TYPE.INT8]: 1,
-    [AIMSink.FIELD_TYPE.INT16]: 1,
-    [AIMSink.FIELD_TYPE.INT32]: 1,
+    [AIMSink.FIELD_TYPE.INT16]: 2,
+    [AIMSink.FIELD_TYPE.INT32]: 4,
     [AIMSink.FIELD_TYPE.KEY_OR_UTF8]: 1,
-    [AIMSink.FIELD_TYPE.FLOAT32]: 1,
-    [AIMSink.FIELD_TYPE.DOUBLE]: 1,
+    [AIMSink.FIELD_TYPE.FLOAT32]: 4,
+    [AIMSink.FIELD_TYPE.DOUBLE]: 8,
     [AIMSink.FIELD_TYPE.BOOL]: 1,
     [AIMSink.FIELD_TYPE.OBJECT]: 1,
     [AIMSink.FIELD_TYPE.ARR_CUSTOM]: 1,
@@ -303,6 +315,7 @@ export class AIMSink {
 
     /** @type {string | number | null} */
     this.string_buffer = "";
+    this.string_byte_length = 0;
 
     /**
      * 0: reading magic number & version \
@@ -330,7 +343,7 @@ export class AIMSink {
     this.ptr = [this];
 
     /** @type {(...args) => void}  */
-    this.debug = false ? console.log : () => {};
+    this.debug = true ? console.log : () => {};
   }
 
   reset() {
@@ -338,6 +351,7 @@ export class AIMSink {
     this.bpsize = 0;
     this.stream_version = -1;
     this.string_buffer = "";
+    this.string_byte_length = 0;
     this.readmode = AIMSink.READ_MODE.MAGIC;
     this.bytesRead = 0;
     this._reading_offset = 0;
@@ -354,6 +368,21 @@ export class AIMSink {
   }
 
   _next_readmode() {
+    if (this.payload.data.metadata.mode === AIMSink.FIELD_MODE.ARRAY) {
+      switch (this.readmode) {
+        case AIMSink.READ_MODE.KEY_FOR_HEADER:
+        case AIMSink.READ_MODE.DATA_FOR_HEADER:
+        case AIMSink.READ_MODE.KEY_FOR_VALUE:
+          this.readmode = AIMSink.READ_MODE.DATA_FOR_VALUE;
+          break;
+        case AIMSink.READ_MODE.DATA_FOR_VALUE:
+          this.readmode = AIMSink.READ_MODE.KEY_FOR_VALUE;
+          break;
+        default:
+          throw new Error("Invalid read mode");
+      }
+      return;
+    }
     switch (this.readmode) {
       case AIMSink.READ_MODE.MAGIC:
         this.readmode = AIMSink.READ_MODE.KEY_FOR_HEADER;
@@ -428,7 +457,7 @@ export class AIMSink {
         case AIMSink.FIELD_TYPE.KEY_OR_UTF8:
           if (this.bpsize < 5) return false;
 
-          field_info.length = viewer.getUint32(this._reading_offset + 1);
+          this.string_byte_length = viewer.getUint32(this._reading_offset + 1);
           this._reading_offset += 5;
           break;
         case AIMSink.FIELD_TYPE.EOF:
@@ -442,7 +471,12 @@ export class AIMSink {
           this.readmode = AIMSink.READ_MODE.DATA_FOR_VALUE; // we finished reading the object
           break;
         default:
-          throw new Error("Invalid field type for key");
+          throw new Error(
+            `Invalid field type for key, tried to read ${getENUMName(
+              AIMSink.FIELD_TYPE,
+              field_info.type
+            )}`
+          );
       }
     } else {
       switch (field_info.type) {
@@ -511,21 +545,31 @@ export class AIMSink {
           this._reading_offset += 9;
           break;
         case AIMSink.FIELD_TYPE.KEY_OR_UTF8:
+          if (this.bpsize < 5) return false;
+
+          this.string_byte_length = viewer.getUint32(this._reading_offset + 1);
+          this._reading_offset += 5;
+          break;
         case AIMSink.FIELD_TYPE.ARR_CUSTOM:
         case AIMSink.FIELD_TYPE.ARR_UINT8:
         case AIMSink.FIELD_TYPE.ARR_BOOL:
         case AIMSink.FIELD_TYPE.ARR_FLOAT32:
         case AIMSink.FIELD_TYPE.ARR_DOUBLE:
-        case AIMSink.FIELD_TYPE.ARR_STRING:
           if (this.bpsize < 5) return false;
 
-          field_info.length = viewer.getUint32(this._reading_offset + 1);
+          const length = viewer.getUint32(this._reading_offset + 1);
+          const field = new AIMSink.FIELD_ARR_CONSTRUCTOR[field_info.type](
+            length
+          );
+          this.payload.enter_scope(field_info.last_key, field);
+          this.payload.data.metadata.length = length;
+          this.payload.data.metadata.type = field_info.type;
+          this.payload.data.metadata.last_key = 0;
           this._reading_offset += 5;
           break;
         case AIMSink.FIELD_TYPE.OBJECT:
           this.payload.enter_scope(field_info.last_key, {});
           this._reading_offset += 1;
-          this.readmode = AIMSink.READ_MODE.DATA_FOR_VALUE; // we finished reading the object
           break;
         case AIMSink.FIELD_TYPE.OBJECT_OR_ARR_CUSTOM_CLOSE:
           this._reading_offset += 1;
@@ -534,9 +578,12 @@ export class AIMSink {
           throw new Error("Invalid field type for value");
       }
     }
+    if (this.payload.data.metadata.type === AIMSink.FIELD_TYPE.ARR_CUSTOM) {
+      this.readmode = AIMSink.READ_MODE.DATA_FOR_VALUE;
+    }
     this.string_buffer = "";
     this._next_readmode();
-    field_info.process_field_type();
+    this.payload.data.metadata.process_field_type();
     return true;
   }
 
@@ -544,13 +591,20 @@ export class AIMSink {
    * @returns {number} bytes to read
    */
   _read_bytes_by_populated_size() {
-    const field_info = this.payload.data.metadata;
-    if (this.bpsize < field_info.byte_length) {
-      const buffer_can_alloc =
-        this.bpsize - (this.bpsize % field_info.value_byte_size);
-      return buffer_can_alloc;
-    } else {
-      return field_info.byte_length;
+    switch (this.payload.data.metadata.type) {
+      case AIMSink.FIELD_TYPE.KEY_OR_UTF8:
+        return this.bpsize < this.string_byte_length
+          ? this.bpsize
+          : this.string_byte_length;
+      default:
+        const field_info = this.payload.data.metadata;
+        if (this.bpsize < field_info.byte_length) {
+          const buffer_can_alloc =
+            this.bpsize - (this.bpsize % field_info.value_byte_size);
+          return buffer_can_alloc;
+        } else {
+          return field_info.byte_length;
+        }
     }
   }
 
@@ -578,14 +632,14 @@ export class AIMSink {
    */
   _read_data(bytes_to_read, field_info) {
     const field_type = field_info.type;
-    const field_length_or_value = field_info.length;
+    const field_length = field_info.length;
     switch (field_type) {
       case AIMSink.FIELD_TYPE.KEY_OR_UTF8:
         const section = this.bytes.subarray(
           this._reading_offset,
           this._reading_offset + bytes_to_read
         );
-        if (field_info.byte_length > bytes_to_read) {
+        if (this.string_byte_length > bytes_to_read) {
           this.string_buffer += this.decoder.decode(section, {
             stream: true,
           });
@@ -602,18 +656,12 @@ export class AIMSink {
       case AIMSink.FIELD_TYPE.ARR_BOOL:
       case AIMSink.FIELD_TYPE.ARR_FLOAT32:
       case AIMSink.FIELD_TYPE.ARR_DOUBLE:
-        if (!this.payload.get_field(field_info.last_key)) {
-          this.payload.set_field(
-            field_info.last_key,
-            new AIMSink.FIELD_ARR_CONSTRUCTOR[field_type](field_info.length)
-          );
-        }
+        const field = this.payload.data.value;
         const byteReader = AIMSink.FIELD_ARR_READER_FN[field_type];
         // FIXME: This should never happen
         if (!byteReader) {
           throw new Error("Invalid field type");
         }
-        const field = this.payload.get_field(field_info.last_key);
         const read_bytes_to_here = this._reading_offset + bytes_to_read;
         let i_bytes = this._reading_offset;
         let i = field.length - field_info.length;
@@ -623,7 +671,7 @@ export class AIMSink {
           i,
           i_bytes,
           bytes: this.bytes,
-          field_length: field_length_or_value,
+          field_length,
         };
         while (i_bytes < read_bytes_to_here) {
           byteReader(args);
@@ -631,12 +679,6 @@ export class AIMSink {
           args.i = ++i;
         }
         break;
-      case AIMSink.FIELD_TYPE.ARR_CUSTOM:
-        const constructor = AIMSink.FIELD_ARR_CONSTRUCTOR[field_type];
-        const arr = new constructor(field_info.length);
-        this.payload.enter_scope(field_info.last_key, arr);
-        this.payload.data.metadata.last_key = 0;
-        return AIMSink.READ_DATA_RETURN_FLAGS.READ_INPLACE;
       default:
         throw new Error("Invalid field type");
     }
@@ -651,6 +693,9 @@ export class AIMSink {
         field_info.last_key,
         AIMSink.FIELD_ARR_CLOSER[field_info.type](field)
       );
+    }
+    if (field_info.mode === AIMSink.FIELD_MODE.ARRAY) {
+      this.payload.exit_scope();
     }
   }
 
@@ -705,6 +750,15 @@ export class AIMSink {
             break readmode_switch;
           case AIMSink.READ_DATA_RETURN_FLAGS.CONTINUE_READING:
             this._reading_offset += bytes_to_read;
+            if (
+              this.payload.data.metadata.type === AIMSink.FIELD_TYPE.KEY_OR_UTF8
+            ) {
+              this.string_byte_length -= bytes_to_read;
+              if (this.string_byte_length <= 0) {
+                this._next_readmode();
+              }
+              break readmode_switch;
+            }
             field_info.byte_length -= bytes_to_read;
             field_info.length -= bytes_to_read / field_info.value_size_in_bytes;
             if (field_info.length <= 0) {
